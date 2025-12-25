@@ -87,7 +87,8 @@ class ArRecorderActivity : AppCompatActivity() {
   fun configureSession(session: Session) {
     session.configure(
       session.config.apply {
-        // Minimal configuration for recording
+        // Enable autofocus for better image quality
+        focusMode = Config.FocusMode.AUTO
       }
     )
   }
