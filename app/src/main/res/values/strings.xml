@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string translatable="false" name="app_name">AR Recorder</string>
+  <string translatable="false" name="status_ready">READY</string>
+  <string translatable="false" name="status_recording">RECORDING</string>
+  <string translatable="false" name="status_saved">SAVED</string>
+  <string translatable="false" name="button_start">START</string>
+  <string translatable="false" name="button_stop">STOP</string>
+  <string translatable="false" name="tracking_paused">Tracking paused...</string>
+</resources>
+
