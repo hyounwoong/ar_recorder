@@ -21,9 +21,11 @@ import android.graphics.YuvImage
 import android.media.Image
 import android.opengl.GLES30
 import android.util.Log
+import android.view.Surface
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import com.google.ar.core.Camera
+import com.google.ar.core.Coordinates2d
 import com.google.ar.core.Frame
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
@@ -53,6 +55,10 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
   lateinit var render: SampleRender
   lateinit var backgroundRenderer: BackgroundRenderer
   var hasSetTextureNames = false
+
+  // Viewport dimensions for aspect ratio matching
+  private var viewportWidth = 1
+  private var viewportHeight = 1
 
   // Recording state
   private val isRecording = AtomicBoolean(false)
@@ -92,6 +98,8 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
 
   override fun onSurfaceChanged(render: SampleRender, width: Int, height: Int) {
     displayRotationHelper.onSurfaceChanged(width, height)
+    viewportWidth = width
+    viewportHeight = height
   }
 
   override fun onDrawFrame(render: SampleRender) {
@@ -197,21 +205,28 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
 
     lastSampleTimestamp = currentTime
 
-    // Sample on background thread to avoid blocking rendering
-    Thread {
-      try {
-        val image = frame.acquireCameraImage()
+    // acquireCameraImage()는 렌더링 스레드(OpenGL 스레드)에서만 호출 가능
+    // DeadlineExceededException 방지를 위해 즉시 호출
+    try {
+      val image = frame.acquireCameraImage()
+      
+      // 이미지 처리는 백그라운드 스레드로 이동
+      Thread {
         try {
           saveFrame(image, frame, camera)
         } finally {
+          // 이미지는 백그라운드 스레드에서 close 가능
           image.close()
         }
-      } catch (e: NotYetAvailableException) {
-        // Image not available yet, skip this frame
-      } catch (e: Exception) {
-        Log.e(TAG, "Failed to sample frame", e)
-      }
-    }.start()
+      }.start()
+    } catch (e: NotYetAvailableException) {
+      // Image not available yet, skip this frame
+    } catch (e: com.google.ar.core.exceptions.DeadlineExceededException) {
+      // 이미지 획득 실패 (너무 늦게 호출됨) - 무시하고 다음 프레임 시도
+      Log.w(TAG, "Failed to acquire camera image: deadline exceeded")
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to sample frame", e)
+    }
   }
 
   private fun saveFrame(image: Image, frame: Frame, camera: Camera) {
@@ -223,37 +238,96 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
       val frameNumber = (frame.timestamp / SAMPLING_INTERVAL_NS).toInt()
       val imageFile = File(outputDir, "frame_${frameNumber.toString().padStart(6, '0')}.jpg")
       
-      // Convert YUV_420_888 to NV21 and save as JPEG
+      // 화면의 4개 모서리를 NDC 좌표로 정의 (-1~1 범위)
+      // BackgroundRenderer가 사용하는 것과 동일한 방식
+      val screenCorners = floatArrayOf(
+        -1f, -1f,  // bottom-left
+         1f, -1f,  // bottom-right
+        -1f,  1f,  // top-left
+         1f,  1f   // top-right
+      )
+      
+      // 두 단계 변환: NDC -> TEXTURE_NORMALIZED -> IMAGE_PIXELS
+      // BackgroundRenderer와 동일한 방식 사용
+      val textureCoords = FloatArray(8)
+      frame.transformCoordinates2d(
+        Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES,
+        screenCorners,
+        Coordinates2d.TEXTURE_NORMALIZED,
+        textureCoords
+      )
+      
+      val imageCorners = FloatArray(8)
+      frame.transformCoordinates2d(
+        Coordinates2d.TEXTURE_NORMALIZED,
+        textureCoords,
+        Coordinates2d.IMAGE_PIXELS,
+        imageCorners
+      )
+      
+      // 변환된 좌표에서 bounding box 계산
+      val minX = minOf(imageCorners[0], imageCorners[2], imageCorners[4], imageCorners[6])
+      val maxX = maxOf(imageCorners[0], imageCorners[2], imageCorners[4], imageCorners[6])
+      val minY = minOf(imageCorners[1], imageCorners[3], imageCorners[5], imageCorners[7])
+      val maxY = maxOf(imageCorners[1], imageCorners[3], imageCorners[5], imageCorners[7])
+      
+      // 디버깅 로그
+      Log.d(TAG, "Frame $frameNumber - Image corners: " +
+        "(${imageCorners[0]}, ${imageCorners[1]}), " +
+        "(${imageCorners[2]}, ${imageCorners[3]}), " +
+        "(${imageCorners[4]}, ${imageCorners[5]}), " +
+        "(${imageCorners[6]}, ${imageCorners[7]})")
+      Log.d(TAG, "Bounding box: minX=$minX, maxX=$maxX, minY=$minY, maxY=$maxY")
+      Log.d(TAG, "Image size: ${image.width}x${image.height}")
+      
+      // 이미지 경계 내로 클리핑
+      val cropX = maxOf(0, minX.toInt())
+      val cropY = maxOf(0, minY.toInt())
+      val cropWidth = minOf(image.width, maxX.toInt()) - cropX
+      val cropHeight = minOf(image.height, maxY.toInt()) - cropY
+      
+      val cropRect = Rect(cropX, cropY, cropX + cropWidth, cropY + cropHeight)
+      
+      Log.d(TAG, "Crop rect: $cropRect (${cropWidth}x${cropHeight})")
+      
+      // Convert YUV_420_888 to NV21 and save as JPEG (크롭된 영역만)
       val nv21 = yuv420888ToNv21(image)
       val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
       FileOutputStream(imageFile).use { out ->
-        yuvImage.compressToJpeg(
-          Rect(0, 0, image.width, image.height),
-          90,
-          out
-        )
+        yuvImage.compressToJpeg(cropRect, 90, out)
       }
 
-      // Save metadata
+      // Save metadata (크롭된 영역 기준으로 intrinsics 조정)
       val pose = camera.pose
       val intrinsics = camera.imageIntrinsics
-      val displayRotation = activity.windowManager.defaultDisplay.rotation * 90
-
       val focalLength = intrinsics.getFocalLength()
       val principalPoint = intrinsics.getPrincipalPoint()
       val imageDimensions = intrinsics.getImageDimensions()
+      
+      // 크롭된 영역에 맞게 intrinsics 조정
+      val cropOffsetX = cropRect.left.toFloat()
+      val cropOffsetY = cropRect.top.toFloat()
+      val scaleX = cropWidth.toFloat() / imageDimensions[0]
+      val scaleY = cropHeight.toFloat() / imageDimensions[1]
+      
+      val adjustedFx = focalLength[0] * scaleX
+      val adjustedFy = focalLength[1] * scaleY
+      val adjustedCx = (principalPoint[0] - cropOffsetX) * scaleX
+      val adjustedCy = (principalPoint[1] - cropOffsetY) * scaleY
+
+      val displayRotation = activity.windowManager.defaultDisplay.rotation * 90
 
       val metadata = """
         {
           "t_ns": ${frame.timestamp},
           "pos": [${pose.tx()}, ${pose.ty()}, ${pose.tz()}],
           "quat": [${pose.qx()}, ${pose.qy()}, ${pose.qz()}, ${pose.qw()}],
-          "fx": ${focalLength[0]},
-          "fy": ${focalLength[1]},
-          "cx": ${principalPoint[0]},
-          "cy": ${principalPoint[1]},
-          "w": ${imageDimensions[0]},
-          "h": ${imageDimensions[1]},
+          "fx": $adjustedFx,
+          "fy": $adjustedFy,
+          "cx": $adjustedCx,
+          "cy": $adjustedCy,
+          "w": $cropWidth,
+          "h": $cropHeight,
           "display_rotation": $displayRotation
         }
       """.trimIndent()
@@ -261,7 +335,7 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
       metadataFile!!.write("$metadata\n".toByteArray())
       metadataFile!!.flush()
 
-      Log.d(TAG, "Saved frame $frameNumber")
+      Log.d(TAG, "Saved frame $frameNumber (cropped: ${cropWidth}x${cropHeight} from ${image.width}x${image.height}, screen: ${viewportWidth}x${viewportHeight})")
     } catch (e: Exception) {
       Log.e(TAG, "Failed to save frame", e)
     }
