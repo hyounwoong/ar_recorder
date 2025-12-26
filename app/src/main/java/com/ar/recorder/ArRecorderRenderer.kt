@@ -26,7 +26,6 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import com.google.ar.core.Camera
 import com.google.ar.core.CameraIntrinsics
-import com.google.ar.core.Coordinates2d
 import com.google.ar.core.Frame
 import com.google.ar.core.Pose
 import com.google.ar.core.Session
@@ -211,34 +210,6 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
     try {
       val image = frame.acquireCameraImage()
       
-      // 화면 모서리를 이미지 픽셀로 변환 (렌더링 스레드에서 수행)
-      val screenCorners = floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)
-      val textureCoords = FloatArray(8)
-      frame.transformCoordinates2d(
-        Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES,
-        screenCorners,
-        Coordinates2d.TEXTURE_NORMALIZED,
-        textureCoords
-      )
-      val imageCorners = FloatArray(8)
-      frame.transformCoordinates2d(
-        Coordinates2d.TEXTURE_NORMALIZED,
-        textureCoords,
-        Coordinates2d.IMAGE_PIXELS,
-        imageCorners
-      )
-      
-      // Bounding box 계산
-      val minX = minOf(imageCorners[0], imageCorners[2], imageCorners[4], imageCorners[6])
-      val maxX = maxOf(imageCorners[0], imageCorners[2], imageCorners[4], imageCorners[6])
-      val minY = minOf(imageCorners[1], imageCorners[3], imageCorners[5], imageCorners[7])
-      val maxY = maxOf(imageCorners[1], imageCorners[3], imageCorners[5], imageCorners[7])
-      
-      val cropX = maxOf(0, minX.toInt())
-      val cropY = maxOf(0, minY.toInt())
-      val cropWidth = minOf(image.width, maxX.toInt()) - cropX
-      val cropHeight = minOf(image.height, maxY.toInt()) - cropY
-      
       // 카메라 데이터 추출
       val pose = camera.pose
       val intrinsics = camera.imageIntrinsics
@@ -247,7 +218,7 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
       // 이미지 처리는 백그라운드 스레드로 이동
       Thread {
         try {
-          saveFrame(image, currentTime, pose, intrinsics, displayRotation, cropX, cropY, cropWidth, cropHeight)
+          saveFrame(image, currentTime, pose, intrinsics, displayRotation)
         } finally {
           image.close()
         }
@@ -266,11 +237,7 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
     timestamp: Long,
     pose: Pose,
     intrinsics: CameraIntrinsics,
-    displayRotation: Int,
-    cropX: Int,
-    cropY: Int,
-    cropWidth: Int,
-    cropHeight: Int
+    displayRotation: Int
   ) {
     if (outputDir == null || metadataFile == null) {
       return
@@ -279,38 +246,34 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
     try {
       val frameNumber = (timestamp / SAMPLING_INTERVAL_NS).toInt()
       val imageFile = File(outputDir, "frame_${frameNumber.toString().padStart(6, '0')}.jpg")
-      val cropRect = Rect(cropX, cropY, cropX + cropWidth, cropY + cropHeight)
       
-      // Convert YUV_420_888 to NV21 and save as JPEG
+      // Convert YUV_420_888 to NV21 and save as JPEG (전체 이미지)
       val nv21 = yuv420888ToNv21(image)
       val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
       FileOutputStream(imageFile).use { out ->
-        yuvImage.compressToJpeg(cropRect, 90, out)
+        yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), 90, out)
       }
 
-      // Adjust intrinsics for cropped region
+      // 원본 intrinsics 그대로 사용 (조정 없음)
       val focalLength = intrinsics.getFocalLength()
       val principalPoint = intrinsics.getPrincipalPoint()
-      val imageDimensions = intrinsics.getImageDimensions()
-      val scaleX = cropWidth.toFloat() / imageDimensions[0]
-      val scaleY = cropHeight.toFloat() / imageDimensions[1]
       
-      val adjustedFx = focalLength[0] * scaleX
-      val adjustedFy = focalLength[1] * scaleY
-      val adjustedCx = (principalPoint[0] - cropX) * scaleX
-      val adjustedCy = (principalPoint[1] - cropY) * scaleY
+      val fx = focalLength[0]
+      val fy = focalLength[1]
+      val cx = principalPoint[0]
+      val cy = principalPoint[1]
 
       val metadata = """
         {
           "t_ns": $timestamp,
           "pos": [${pose.tx()}, ${pose.ty()}, ${pose.tz()}],
           "quat": [${pose.qx()}, ${pose.qy()}, ${pose.qz()}, ${pose.qw()}],
-          "fx": $adjustedFx,
-          "fy": $adjustedFy,
-          "cx": $adjustedCx,
-          "cy": $adjustedCy,
-          "w": $cropWidth,
-          "h": $cropHeight,
+          "fx": $fx,
+          "fy": $fy,
+          "cx": $cx,
+          "cy": $cy,
+          "w": ${image.width},
+          "h": ${image.height},
           "display_rotation": $displayRotation
         }
       """.trimIndent()
@@ -318,7 +281,7 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
       metadataFile!!.write("$metadata\n".toByteArray())
       metadataFile!!.flush()
 
-      Log.d(TAG, "Saved frame $frameNumber (${cropWidth}x${cropHeight} from ${image.width}x${image.height})")
+      Log.d(TAG, "Saved frame $frameNumber (${image.width}x${image.height})")
     } catch (e: Exception) {
       Log.e(TAG, "Failed to save frame", e)
     }
