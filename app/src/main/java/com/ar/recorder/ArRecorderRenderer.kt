@@ -32,8 +32,6 @@ import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import com.ar.recorder.common.helpers.DisplayRotationHelper
 import com.ar.recorder.common.helpers.TrackingStateHelper
-import com.ar.recorder.common.samplerender.Framebuffer
-import com.ar.recorder.common.samplerender.GLError
 import com.ar.recorder.common.samplerender.SampleRender
 import com.ar.recorder.common.samplerender.arcore.BackgroundRenderer
 import com.google.ar.core.exceptions.CameraNotAvailableException
@@ -50,7 +48,7 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
   companion object {
     val TAG = "ArRecorderRenderer"
     
-    private const val SAMPLING_INTERVAL_NS = 500_000_000L // 0.5 seconds (2fps)
+    private const val SAMPLING_INTERVAL_NS = 200_000_000L // 0.2 seconds (5fps)
   }
 
   lateinit var render: SampleRender

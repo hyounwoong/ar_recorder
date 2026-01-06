@@ -85,7 +85,7 @@ print(f"이미지 파일 {len(image_files)}개 찾음")
 # ============================================
 # 프레임 번호로 이미지와 JSONL 데이터 매칭 (수정)
 # ============================================
-SAMPLING_INTERVAL_NS = 500_000_000  # 0.5초 (2fps)
+SAMPLING_INTERVAL_NS = 200_000_000  # 0.2초 (5fps)
 
 def extract_frame_number(filename):
     """파일명에서 프레임 번호 추출 (예: frame_1501460.jpg -> 1501460)"""
@@ -104,6 +104,46 @@ for img_path in image_files:
         image_dict[frame_num] = img_path
 
 print(f"이미지 파일 {len(image_dict)}개 매핑됨")
+
+# 실제 SAMPLING_INTERVAL_NS 역산 (이미지 파일명과 JSONL의 t_ns 비교)
+# 여러 프레임을 비교해서 더 정확하게 역산
+if len(jsonl_data) > 0 and len(image_dict) > 0:
+    intervals = []
+    for jsonl_item in jsonl_data[:min(5, len(jsonl_data))]:  # 최대 5개 프레임 비교
+        t_ns = jsonl_item.get('t_ns')
+        if t_ns is None:
+            continue
+        
+        # 이 t_ns로 계산된 프레임 번호
+        calculated_frame = int(t_ns // SAMPLING_INTERVAL_NS)
+        
+        # 실제 이미지 파일명의 프레임 번호와 매칭되는지 확인
+        # 가장 가까운 프레임 번호 찾기
+        closest_frame = None
+        min_diff = float('inf')
+        for img_frame in image_dict.keys():
+            diff = abs(img_frame - calculated_frame)
+            if diff < min_diff:
+                min_diff = diff
+                closest_frame = img_frame
+        
+        # 가장 가까운 프레임이 있으면 역산
+        if closest_frame is not None and min_diff < 10:  # 차이가 10 이하일 때만
+            estimated_interval = t_ns // closest_frame
+            intervals.append(estimated_interval)
+    
+    if intervals:
+        # 중앙값 사용 (이상치에 덜 민감)
+        intervals.sort()
+        estimated_interval = intervals[len(intervals) // 2]
+        estimated_fps = 1e9 / estimated_interval
+        print(f"역산된 SAMPLING_INTERVAL_NS: {estimated_interval} (예상 FPS: {estimated_fps:.1f})")
+        
+        # 역산된 값이 현재 설정과 다르면 조정
+        if abs(estimated_interval - SAMPLING_INTERVAL_NS) > 50_000_000:  # 0.05초 이상 차이
+            print(f"⚠️  설정된 SAMPLING_INTERVAL_NS ({SAMPLING_INTERVAL_NS}, {1e9/SAMPLING_INTERVAL_NS:.1f}fps)와 실제 값 ({estimated_interval}, {estimated_fps:.1f}fps)이 다릅니다.")
+            print(f"   실제 데이터에 맞게 {estimated_interval}로 조정합니다.")
+            SAMPLING_INTERVAL_NS = estimated_interval
 
 # JSONL 데이터와 이미지를 t_ns 기반으로 정확히 매칭
 matched_data = []
