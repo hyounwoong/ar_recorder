@@ -15,7 +15,7 @@ ARCore를 사용하여 카메라 이미지와 포즈(pose) 정보를 실시간�
 ### 1. 프로젝트 클론
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/hyounwoong/ar_recorder.git
 cd ar_recorder
 ```
 
