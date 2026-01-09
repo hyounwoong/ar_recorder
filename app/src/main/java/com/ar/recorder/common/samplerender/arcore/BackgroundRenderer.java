@@ -164,20 +164,23 @@ public class BackgroundRenderer {
       }
       occlusionShader.close();
       occlusionShader = null;
-      this.useOcclusion = useOcclusion;
     }
+    this.useOcclusion = useOcclusion;
+    
+    // useOcclusion이 false면 셰이더를 로드하지 않음
+    if (!useOcclusion) {
+      return;
+    }
+    
     HashMap<String, String> defines = new HashMap<>();
-    defines.put("USE_OCCLUSION", useOcclusion ? "1" : "0");
+    defines.put("USE_OCCLUSION", "1");
     occlusionShader =
         Shader.createFromAssets(render, "shaders/occlusion.vert", "shaders/occlusion.frag", defines)
             .setDepthTest(false)
             .setDepthWrite(false)
-            .setBlend(Shader.BlendFactor.SRC_ALPHA, Shader.BlendFactor.ONE_MINUS_SRC_ALPHA);
-    if (useOcclusion) {
-      occlusionShader
-          .setTexture("u_CameraDepthTexture", cameraDepthTexture)
-          .setFloat("u_DepthAspectRatio", aspectRatio);
-    }
+            .setBlend(Shader.BlendFactor.SRC_ALPHA, Shader.BlendFactor.ONE_MINUS_SRC_ALPHA)
+            .setTexture("u_CameraDepthTexture", cameraDepthTexture)
+            .setFloat("u_DepthAspectRatio", aspectRatio);
   }
 
   /**
@@ -213,7 +216,7 @@ public class BackgroundRenderer {
         GLES30.GL_RG,
         GLES30.GL_UNSIGNED_BYTE,
         image.getPlanes()[0].getBuffer());
-    if (useOcclusion) {
+    if (useOcclusion && occlusionShader != null) {
       aspectRatio = (float) image.getWidth() / (float) image.getHeight();
       occlusionShader.setFloat("u_DepthAspectRatio", aspectRatio);
     }
@@ -239,6 +242,10 @@ public class BackgroundRenderer {
    */
   public void drawVirtualScene(
       SampleRender render, Framebuffer virtualSceneFramebuffer, float zNear, float zFar) {
+    // occlusionShader가 null이면 사용하지 않음
+    if (occlusionShader == null) {
+      return;
+    }
     occlusionShader.setTexture(
         "u_VirtualSceneColorTexture", virtualSceneFramebuffer.getColorTexture());
     if (useOcclusion) {

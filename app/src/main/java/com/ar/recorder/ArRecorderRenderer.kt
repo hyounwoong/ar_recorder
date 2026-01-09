@@ -50,7 +50,7 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
   companion object {
     val TAG = "ArRecorderRenderer"
     
-    private const val SAMPLING_INTERVAL_NS = 500_000_000L // 0.5 seconds (2fps)
+    private const val SAMPLING_INTERVAL_NS = 200_000_000L // 0.2 seconds (5fps)
   }
 
   lateinit var render: SampleRender
