@@ -158,25 +158,25 @@ public class BackgroundRenderer {
    * #define}s, and must be called on the GL thread.
    */
   public void setUseOcclusion(SampleRender render, boolean useOcclusion) throws IOException {
-    if (this.useOcclusion == useOcclusion) {
-      return;
-    }
     if (occlusionShader != null) {
+      if (this.useOcclusion == useOcclusion) {
+        return;
+      }
       occlusionShader.close();
       occlusionShader = null;
+      this.useOcclusion = useOcclusion;
     }
-    this.useOcclusion = useOcclusion;
-    // Only load occlusion shader if occlusion is enabled
+    HashMap<String, String> defines = new HashMap<>();
+    defines.put("USE_OCCLUSION", useOcclusion ? "1" : "0");
+    occlusionShader =
+        Shader.createFromAssets(render, "shaders/occlusion.vert", "shaders/occlusion.frag", defines)
+            .setDepthTest(false)
+            .setDepthWrite(false)
+            .setBlend(Shader.BlendFactor.SRC_ALPHA, Shader.BlendFactor.ONE_MINUS_SRC_ALPHA);
     if (useOcclusion) {
-      HashMap<String, String> defines = new HashMap<>();
-      defines.put("USE_OCCLUSION", "1");
-      occlusionShader =
-          Shader.createFromAssets(render, "shaders/occlusion.vert", "shaders/occlusion.frag", defines)
-              .setDepthTest(false)
-              .setDepthWrite(false)
-              .setBlend(Shader.BlendFactor.SRC_ALPHA, Shader.BlendFactor.ONE_MINUS_SRC_ALPHA)
-              .setTexture("u_CameraDepthTexture", cameraDepthTexture)
-              .setFloat("u_DepthAspectRatio", aspectRatio);
+      occlusionShader
+          .setTexture("u_CameraDepthTexture", cameraDepthTexture)
+          .setFloat("u_DepthAspectRatio", aspectRatio);
     }
   }
 
@@ -239,9 +239,6 @@ public class BackgroundRenderer {
    */
   public void drawVirtualScene(
       SampleRender render, Framebuffer virtualSceneFramebuffer, float zNear, float zFar) {
-    if (occlusionShader == null) {
-      return;
-    }
     occlusionShader.setTexture(
         "u_VirtualSceneColorTexture", virtualSceneFramebuffer.getColorTexture());
     if (useOcclusion) {
