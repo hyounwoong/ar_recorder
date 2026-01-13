@@ -334,9 +334,103 @@ def search_heights(points, z_range, center_axis, volume_data, max_failures=MAX_C
 # ============================================
 # ARCore 좌표 변환 함수
 # ============================================
+def transform_point_to_anchor_relative(point_scene, first_frame_params, scene_metadata=None):
+    """
+    중력 정렬 씬 좌표계의 점을 앵커 기준 상대 좌표로 변환
+    
+    변환 경로:
+    1. 중력 정렬 씬 → hf_alignment 적용 씬 (T_inv)
+    2. hf_alignment 적용 씬 → 첫 프레임 카메라 기준 좌표계 (T_camera_origin)
+    3. 첫 프레임 카메라 기준 좌표계 → 앵커 기준 상대 좌표
+    
+    Args:
+        point_scene: 중력 정렬 씬 좌표계의 점 [x, y, z]
+        first_frame_params: 첫 프레임의 ARCore pose 정보 (quat, pos, anchor_pos, anchor_quat 포함)
+        scene_metadata: 씬 메타데이터 (hf_alignment 포함)
+    
+    Returns:
+        앵커 기준 상대 좌표계의 점 [x, y, z] (OpenGL 좌표계)
+    """
+    point_scene = np.array(point_scene, dtype=np.float32)
+    
+    if scene_metadata is None:
+        raise ValueError("scene_metadata is required")
+    
+    A = np.array(scene_metadata.get('hf_alignment', np.eye(4))).reshape(4, 4)
+    
+    # 중력 벡터 계산 (hf_alignment 적용 씬 좌표계에서)
+    gl_to_cv = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]])
+    arcore_y = np.array([0, 1, 0])
+    gravity = (A[:3, :3] @ gl_to_cv @ arcore_y)
+    gravity = gravity / np.linalg.norm(gravity)
+    
+    # 중력 정렬 회전 행렬 계산
+    R = Rotation.align_vectors([[0, 0, 1]], [gravity])[0]
+    T = np.eye(4)
+    T[:3, :3] = R.as_matrix()
+    T_inv = np.linalg.inv(T)
+    
+    # 1단계: 중력 정렬 역변환 (중력 정렬 씬 → hf_alignment 적용 씬)
+    point_after_inv = T_inv[:3, :3] @ point_scene + T_inv[:3, 3]
+    
+    # 첫 프레임 카메라의 c2w 계산
+    quat = np.array(first_frame_params['quat'])
+    pos_arcore = np.array(first_frame_params['pos'])
+    
+    gl_to_cv = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=np.float32)
+    R_c2w_gl = Rotation.from_quat(quat).as_matrix()
+    R_c2w_cv = gl_to_cv @ R_c2w_gl @ gl_to_cv.T
+    pos_cv = gl_to_cv @ pos_arcore
+    
+    c2w = np.eye(4, dtype=np.float32)
+    c2w[:3, :3] = R_c2w_cv
+    c2w[:3, 3] = pos_cv
+    
+    w2c0 = np.linalg.inv(c2w)
+    
+    # M 행렬 (CV → glTF 좌표계 변환)
+    M = np.eye(4, dtype=np.float64)
+    M[1, 1] = -1.0
+    M[2, 2] = -1.0
+    M_inv = np.linalg.inv(M)
+    
+    A_no_center = M @ w2c0.astype(np.float64)
+    A_no_center_inv = np.linalg.inv(A_no_center)
+    
+    # c2w0 계산 (원본 씬 좌표계에서의 첫 프레임 카메라 → 월드)
+    c2w0 = A_no_center_inv @ M
+    
+    # 첫 프레임 카메라 위치 (hf_alignment 적용 씬 좌표계에서)
+    first_camera_pos_original = c2w0[:3, 3]
+    first_camera_pos_hf_aligned = A[:3, :3] @ first_camera_pos_original + A[:3, 3]
+    
+    # 2단계: 첫 프레임 카메라 기준 좌표계로 변환 (glTF 좌표계)
+    point_camera_frame_gltf = point_after_inv - first_camera_pos_hf_aligned
+    
+    # glTF → OpenCV 좌표계 변환 (c2w가 OpenCV 기준이므로)
+    point_camera_frame_cv = M_inv[:3, :3] @ point_camera_frame_gltf
+    
+    # 3단계: ARCore 월드 좌표계로 변환 (OpenCV 좌표계 기준)
+    point_arcore_world_cv = c2w[:3, :3] @ point_camera_frame_cv + c2w[:3, 3]
+    
+    # OpenCV → OpenGL 좌표계 변환 (ARCore 월드 좌표계)
+    cv_to_gl = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=np.float32)
+    point_arcore_world_gl = cv_to_gl @ point_arcore_world_cv
+    
+    # 4단계: 앵커 기준 상대 좌표로 변환
+    anchor_pos = np.array(first_frame_params.get('anchor_pos', first_frame_params.get('pos', [0.0, 0.0, 0.0])), dtype=np.float32)
+    anchor_quat = np.array(first_frame_params.get('anchor_quat', first_frame_params.get('quat', [0.0, 0.0, 0.0, 1.0])), dtype=np.float32)
+    anchor_rotation = Rotation.from_quat(anchor_quat).as_matrix()
+    
+    # 월드 좌표계에서 앵커 기준 상대 좌표로 변환
+    point_relative = point_arcore_world_gl - anchor_pos
+    point_anchor_relative = anchor_rotation.T @ point_relative
+    
+    return point_anchor_relative
+
 def transform_point_to_arcore(point_scene, first_frame_params, scene_metadata=None):
     """
-    중력 정렬 씬 좌표계의 점을 ARCore 월드 좌표계로 변환
+    중력 정렬 씬 좌표계의 점을 ARCore 월드 좌표계로 변환 (기존 함수, 호환성 유지)
     
     변환 경로:
     1. 중력 정렬 씬 → hf_alignment 적용 씬 (T_inv)
@@ -556,20 +650,25 @@ def calculate_rotation_axis(glb_path, jsonl_data, scene_metadata):
         bottom_point_scene = np.array([center_axis[0], center_axis[1], z_min_filtered])
         top_point_scene = np.array([center_axis[0], center_axis[1], z_max_filtered])
         
-        # 5단계: ARCore 좌표계로 변환
+        # 5단계: ARCore 월드 좌표계로 변환 (첫 프레임 앵커 기준 월드 W*)
+        # GPU에서 프레임 간 드리프트 보정이 이미 적용되어 있으므로,
+        # 결과는 "첫 프레임 앵커 기준 월드 좌표"로 반환
         jsonl_data_sorted = sorted(jsonl_data, key=lambda x: x.get('t_ns', 0))
         first_frame_params = jsonl_data_sorted[0]
         
-        bottom_point_arcore = transform_point_to_arcore(
+        bottom_point_world = transform_point_to_arcore(
             bottom_point_scene, first_frame_params, scene_metadata
         )
-        top_point_arcore = transform_point_to_arcore(
+        top_point_world = transform_point_to_arcore(
             top_point_scene, first_frame_params, scene_metadata
         )
         
+        print(f"[GPU] 회전축 월드 좌표: bottom=({bottom_point_world[0]:.3f}, {bottom_point_world[1]:.3f}, {bottom_point_world[2]:.3f}), "
+              f"top=({top_point_world[0]:.3f}, {top_point_world[1]:.3f}, {top_point_world[2]:.3f})", flush=True)
+        
         return {
-            'bottom_point': [float(bottom_point_arcore[0]), float(bottom_point_arcore[1]), float(bottom_point_arcore[2])],
-            'top_point': [float(top_point_arcore[0]), float(top_point_arcore[1]), float(top_point_arcore[2])],
+            'bottom_point': [float(bottom_point_world[0]), float(bottom_point_world[1]), float(bottom_point_world[2])],
+            'top_point': [float(top_point_world[0]), float(top_point_world[1]), float(top_point_world[2])],
             'center_axis': [float(center_axis[0]), float(center_axis[1])],
             'height_range': [float(z_min_filtered), float(z_max_filtered)]
         }
@@ -667,18 +766,34 @@ if __name__ == "__main__":
     
     print(f"[GPU] 매칭된 데이터: {len(matched_data)}개", flush=True)
     
-    # 데이터 변환
-    print(f"[GPU] 데이터 변환 중...", flush=True)
-    N = len(matched_data)
-    extrinsics = np.zeros((N, 4, 4), dtype=np.float32)
-    intrinsics = np.zeros((N, 3, 3), dtype=np.float32)
-    matched_image_files = []
+    # 첫 프레임 앵커 정보 추출 (A_1)
+    first_frame_params = matched_data[0]['params']
+    first_anchor_pos = np.array(first_frame_params.get('anchor_pos', first_frame_params.get('pos', [0.0, 0.0, 0.0])), dtype=np.float32)
+    first_anchor_quat = np.array(first_frame_params.get('anchor_quat', first_frame_params.get('quat', [0.0, 0.0, 0.0, 1.0])), dtype=np.float32)
+    first_anchor_rotation = Rotation.from_quat(first_anchor_quat).as_matrix()
+    print(f"[GPU] 첫 프레임 앵커: pos=({first_anchor_pos[0]:.3f}, {first_anchor_pos[1]:.3f}, {first_anchor_pos[2]:.3f})", flush=True)
     
+    # 첫 프레임 앵커 변환 행렬 (A_1): OpenGL → OpenCV 좌표계
     gl_to_cv = np.array([
         [1,  0,  0],
         [0, -1,  0],
         [0,  0, -1]
     ], dtype=np.float32)
+    
+    first_anchor_rotation_cv = gl_to_cv @ first_anchor_rotation @ gl_to_cv.T
+    first_anchor_pos_cv = gl_to_cv @ first_anchor_pos
+    
+    # A_1 행렬 (OpenCV 좌표계)
+    A1 = np.eye(4, dtype=np.float32)
+    A1[:3, :3] = first_anchor_rotation_cv
+    A1[:3, 3] = first_anchor_pos_cv
+    
+    # 데이터 변환
+    print(f"[GPU] 데이터 변환 중 (앵커 드리프트 보정 적용)...", flush=True)
+    N = len(matched_data)
+    extrinsics = np.zeros((N, 4, 4), dtype=np.float32)
+    intrinsics = np.zeros((N, 3, 3), dtype=np.float32)
+    matched_image_files = []
     
     for i, item in enumerate(matched_data):
         params = item['params']
@@ -689,6 +804,7 @@ if __name__ == "__main__":
         if jsonl_w is None or jsonl_h is None:
             continue
         
+        # 카메라 pose (P_i)
         quat = params.get('quat')
         pos = params.get('pos')
         if quat is None or pos is None:
@@ -697,17 +813,48 @@ if __name__ == "__main__":
         quat = np.array(quat, dtype=np.float32)
         pos = np.array(pos, dtype=np.float32)
         
+        # 현재 프레임 앵커 pose (A_i)
+        current_anchor_pos = np.array(params.get('anchor_pos', params.get('pos', [0.0, 0.0, 0.0])), dtype=np.float32)
+        current_anchor_quat = np.array(params.get('anchor_quat', params.get('quat', [0.0, 0.0, 0.0, 1.0])), dtype=np.float32)
+        current_anchor_rotation = Rotation.from_quat(current_anchor_quat).as_matrix()
+        
+        # A_i 행렬 (OpenCV 좌표계)
+        current_anchor_rotation_cv = gl_to_cv @ current_anchor_rotation @ gl_to_cv.T
+        current_anchor_pos_cv = gl_to_cv @ current_anchor_pos
+        
+        Ai = np.eye(4, dtype=np.float32)
+        Ai[:3, :3] = current_anchor_rotation_cv
+        Ai[:3, 3] = current_anchor_pos_cv
+        
+        # 보정 변환: C_i = A_1 * A_i^(-1)
+        # 이 변환은 "현재 프레임의 월드 좌표계"를 "첫 프레임의 월드 좌표계"로 되돌림
+        Ai_inv = np.linalg.inv(Ai)
+        Ci = A1 @ Ai_inv
+        
+        # 카메라 pose를 OpenCV 좌표계로 변환
         R_c2w_gl = Rotation.from_quat(quat).as_matrix()
         R_c2w_cv = gl_to_cv @ R_c2w_gl @ gl_to_cv.T
         pos_cv = gl_to_cv @ pos
         
-        c2w = np.eye(4, dtype=np.float32)
-        c2w[:3, :3] = R_c2w_cv
-        c2w[:3, 3] = pos_cv
-        w2c = np.linalg.inv(c2w)
+        # 원본 카메라 pose 행렬 (P_i): c2w (카메라 → 월드)
+        Pi = np.eye(4, dtype=np.float32)
+        Pi[:3, :3] = R_c2w_cv
+        Pi[:3, 3] = pos_cv
         
-        extrinsics[i] = w2c
+        # 보정된 카메라 pose: P_i' = C_i * P_i
+        # C_i는 월드 좌표계를 변환하므로, c2w에 적용
+        Pi_corrected = Ci @ Pi
+        
+        # 보정된 pose에서 w2c 추출 (모델 입력용)
+        w2c_corrected = np.linalg.inv(Pi_corrected)
+        
+        extrinsics[i] = w2c_corrected
         matched_image_files.append(img_path)
+        
+        # 디버깅: 첫 프레임과 마지막 프레임만 로그
+        if i == 0 or i == len(matched_data) - 1:
+            print(f"[GPU] Frame {i}: original pos=({pos_cv[0]:.3f}, {pos_cv[1]:.3f}, {pos_cv[2]:.3f}), "
+                  f"corrected pos=({Pi_corrected[0,3]:.3f}, {Pi_corrected[1,3]:.3f}, {Pi_corrected[2,3]:.3f})", flush=True)
         
         fx = params.get('fx')
         fy = params.get('fy')

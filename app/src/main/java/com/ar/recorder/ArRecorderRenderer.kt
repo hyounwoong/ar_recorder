@@ -25,6 +25,7 @@ import android.util.Log
 import android.view.Surface
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
+import com.google.ar.core.Anchor
 import com.google.ar.core.Camera
 import com.google.ar.core.CameraIntrinsics
 import com.google.ar.core.Frame
@@ -48,6 +49,8 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
+import org.json.JSONObject
+import org.json.JSONArray
 
 /** Renders the AR Recorder application. */
 class ArRecorderRenderer(val activity: ArRecorderActivity) :
@@ -91,10 +94,15 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
 
   // Recording state
   private val isRecording = AtomicBoolean(false)
+  private val shouldStartRecording = AtomicBoolean(false)  // Flag to start recording on next frame
   private var lastSampleTimestamp: Long = 0
   private var sessionStartTime: Long = 0
   private var outputDir: File? = null
   private var metadataFile: FileOutputStream? = null
+  
+  // Anchor for pose correction
+  private var anchor: Anchor? = null  // ARCore Anchor object
+  private var anchorPose: Pose? = null  // First frame anchor pose (for JSONL)
 
   val session
     get() = activity.arCoreSessionHelper.session
@@ -285,6 +293,115 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
     Log.d(TAG, "Rotation axis set: bottom=(${bottomPoint[0]}, ${bottomPoint[1]}, ${bottomPoint[2]}), top=(${topPoint[0]}, ${topPoint[1]}, ${topPoint[2]})")
   }
   
+  /**
+   * Quaternion을 회전 행렬로 변환
+   */
+  private fun quaternionToRotationMatrix(qx: Float, qy: Float, qz: Float, qw: Float): FloatArray {
+    val matrix = FloatArray(16)
+    android.opengl.Matrix.setIdentityM(matrix, 0)
+    
+    // Quaternion을 회전 행렬로 변환
+    val xx = qx * qx
+    val yy = qy * qy
+    val zz = qz * qz
+    val xy = qx * qy
+    val xz = qx * qz
+    val yz = qy * qz
+    val wx = qw * qx
+    val wy = qw * qy
+    val wz = qw * qz
+    
+    matrix[0] = 1.0f - 2.0f * (yy + zz)
+    matrix[1] = 2.0f * (xy + wz)
+    matrix[2] = 2.0f * (xz - wy)
+    matrix[3] = 0.0f
+    
+    matrix[4] = 2.0f * (xy - wz)
+    matrix[5] = 1.0f - 2.0f * (xx + zz)
+    matrix[6] = 2.0f * (yz + wx)
+    matrix[7] = 0.0f
+    
+    matrix[8] = 2.0f * (xz + wy)
+    matrix[9] = 2.0f * (yz - wx)
+    matrix[10] = 1.0f - 2.0f * (xx + yy)
+    matrix[11] = 0.0f
+    
+    matrix[12] = 0.0f
+    matrix[13] = 0.0f
+    matrix[14] = 0.0f
+    matrix[15] = 1.0f
+    
+    return matrix
+  }
+  
+  /**
+   * 월드 좌표(첫 프레임 앵커 기준 월드 W*)를 현재 앵커 기준 상대 좌표로 변환
+   * 
+   * GPU는 이미 프레임 간 드리프트 보정을 적용하여 "첫 프레임 앵커 기준 월드 좌표"로 결과를 반환함.
+   * Android에서는 이 월드 좌표를 현재 앵커 기준으로만 변환하여 렌더링.
+   * 
+   * 변환: P_current_relative = R_current^T * (P_world - t_current)
+   * 
+   * @param pointWorld 월드 좌표 (첫 프레임 앵커 기준 월드 W*, ARCore OpenGL 좌표계)
+   * @param currentAnchorPose 현재 앵커의 pose
+   * @return 현재 앵커 기준 상대 좌표
+   */
+  private fun transformWorldToCurrentAnchor(
+    pointWorld: FloatArray,
+    currentAnchorPose: Pose
+  ): FloatArray {
+    Log.d(TAG, "Transform: world=(${pointWorld[0]}, ${pointWorld[1]}, ${pointWorld[2]})")
+    Log.d(TAG, "Transform: current_anchor_pos=(${currentAnchorPose.tx()}, ${currentAnchorPose.ty()}, ${currentAnchorPose.tz()})")
+    
+    // 현재 앵커 회전 행렬
+    val currentAnchorRotation = quaternionToRotationMatrix(
+      currentAnchorPose.qx(), currentAnchorPose.qy(), currentAnchorPose.qz(), currentAnchorPose.qw()
+    )
+    
+    // 현재 앵커의 역회전 행렬 (transpose)
+    val currentAnchorRotationT = FloatArray(16)
+    android.opengl.Matrix.transposeM(currentAnchorRotationT, 0, currentAnchorRotation, 0)
+    
+    // 월드 좌표 → 현재 앵커 기준 상대 좌표
+    // point_relative = point_world - current_anchor_pos
+    // point_current_relative = current_anchor_rotation.T @ point_relative
+    val pointRelativeToCurrent = floatArrayOf(
+      pointWorld[0] - currentAnchorPose.tx(),
+      pointWorld[1] - currentAnchorPose.ty(),
+      pointWorld[2] - currentAnchorPose.tz()
+    )
+    
+    val pointCurrentRelative = FloatArray(4)
+    pointCurrentRelative[0] = pointRelativeToCurrent[0]
+    pointCurrentRelative[1] = pointRelativeToCurrent[1]
+    pointCurrentRelative[2] = pointRelativeToCurrent[2]
+    pointCurrentRelative[3] = 1.0f
+    android.opengl.Matrix.multiplyMV(pointCurrentRelative, 0, currentAnchorRotationT, 0, pointCurrentRelative, 0)
+    
+    Log.d(TAG, "Transform: current_relative=(${pointCurrentRelative[0]}, ${pointCurrentRelative[1]}, ${pointCurrentRelative[2]})")
+    
+    return floatArrayOf(
+      pointCurrentRelative[0],
+      pointCurrentRelative[1],
+      pointCurrentRelative[2]
+    )
+  }
+  
+  /**
+   * 현재 프레임의 앵커 pose 가져오기
+   */
+  private fun getCurrentAnchorPose(): Pose? {
+    val currentAnchor = anchor ?: return null
+    return try {
+      // ARCore Anchor의 현재 pose를 가져옴 (ARCore가 자동으로 추적)
+      // Anchor가 생성되었다면 pose는 항상 유효함 (ARCore가 자동으로 업데이트)
+      currentAnchor.pose
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to get current anchor pose", e)
+      null
+    }
+  }
+  
   private fun createCrosshair(render: SampleRender) {
     try {
       // Simple shader for drawing a colored square
@@ -385,6 +502,12 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
       }
 
     val camera = frame.camera
+    
+    // Debug: Log camera position every 60 frames (about 1 second at 60fps)
+    if (frame.timestamp % 1_000_000_000L < 16_666_666L) {  // Every ~1 second
+      val cameraPose = camera.pose
+      Log.d(TAG, "Camera position: (${cameraPose.tx()}, ${cameraPose.ty()}, ${cameraPose.tz()})")
+    }
 
     // BackgroundRenderer.updateDisplayGeometry must be called every frame
     backgroundRenderer.updateDisplayGeometry(frame)
@@ -413,6 +536,11 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
       sphereShader?.let { shader ->
         sphereMesh?.let { mesh ->
           for (spherePos in spheres) {
+            // Debug: Log sphere position (only first sphere, every 60 frames)
+            if (spheres.indexOf(spherePos) == 0 && frame.timestamp % 1_000_000_000L < 16_666_666L) {
+              Log.d(TAG, "Rendering sphere at: (${spherePos[0]}, ${spherePos[1]}, ${spherePos[2]})")
+            }
+            
             // Create model matrix (translation to sphere position)
             // Spheres don't need rotation since they look the same from all angles
             Matrix.setIdentityM(modelMatrix, 0)
@@ -481,6 +609,11 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
       }
     }
 
+    // Initialize recording if requested (on OpenGL thread)
+    if (shouldStartRecording.get() && camera.trackingState == TrackingState.TRACKING) {
+      initializeRecording(frame, camera)
+    }
+    
     // Sample frame if recording and tracking
     if (isRecording.get() && camera.trackingState == TrackingState.TRACKING) {
       sampleFrame(frame, camera)
@@ -493,7 +626,27 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
       return
     }
 
+    // Set flag to start recording on next frame (onDrawFrame will handle it)
+    // This ensures session.update() is called on the OpenGL thread
+    shouldStartRecording.set(true)
+    Log.i(TAG, "Recording start requested, will start on next frame")
+  }
+  
+  private fun initializeRecording(frame: Frame, camera: Camera) {
     try {
+      val session = session ?: return
+      
+      if (camera.trackingState != TrackingState.TRACKING) {
+        showError("Camera not tracking. Please wait...")
+        shouldStartRecording.set(false)
+        return
+      }
+      
+      // Create actual ARCore Anchor from first frame camera pose
+      anchor = session.createAnchor(camera.pose)
+      anchorPose = camera.pose  // Store for JSONL
+      Log.i(TAG, "Anchor created: pos=(${anchorPose!!.tx()}, ${anchorPose!!.ty()}, ${anchorPose!!.tz()})")
+      
       // Create output directory
       val recordingsDir = File(activity.getExternalFilesDir(null), "recordings")
       if (!recordingsDir.exists()) {
@@ -511,12 +664,14 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
       sessionStartTime = System.nanoTime()
       lastSampleTimestamp = 0
       isRecording.set(true)
+      shouldStartRecording.set(false)
 
       Log.i(TAG, "Recording started: ${outputDir!!.absolutePath}")
     } catch (e: Exception) {
       Log.e(TAG, "Failed to start recording", e)
       showError("Failed to start recording: $e")
       isRecording.set(false)
+      shouldStartRecording.set(false)
     }
   }
 
@@ -529,6 +684,9 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
       isRecording.set(false)
       metadataFile?.close()
       metadataFile = null
+      
+      // Don't clean up anchor yet - it's needed for rendering after server upload
+      // Anchor will be cleaned up after server upload completes
 
       val sessionDir = outputDir
       Log.i(TAG, "Recording stopped: ${sessionDir?.absolutePath}")
@@ -558,20 +716,79 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
     
     CoroutineScope(Dispatchers.IO).launch {
       try {
+        // 첫 프레임 앵커 정보 읽기
+        val jsonlFiles = sessionDir.listFiles { _, name -> name.endsWith(".jsonl") }
+        var firstAnchorPos: FloatArray? = null
+        var firstAnchorQuat: FloatArray? = null
+        
+        if (jsonlFiles != null && jsonlFiles.isNotEmpty()) {
+          try {
+            val jsonlFile = jsonlFiles[0]
+            val content = jsonlFile.readText()
+            
+            // JSONL 파일에서 첫 번째 JSON 객체 찾기 (여러 줄에 걸칠 수 있음)
+            var braceCount = 0
+            var jsonString = ""
+            for (char in content) {
+              jsonString += char
+              if (char == '{') {
+                braceCount++
+              } else if (char == '}') {
+                braceCount--
+                if (braceCount == 0) {
+                  // 첫 번째 JSON 객체 완성
+                  try {
+                    val json = JSONObject(jsonString.trim())
+                    if (json.has("anchor_pos") && json.has("anchor_quat")) {
+                      val anchorPosArray = json.getJSONArray("anchor_pos")
+                      val anchorQuatArray = json.getJSONArray("anchor_quat")
+                      firstAnchorPos = floatArrayOf(
+                        anchorPosArray.getDouble(0).toFloat(),
+                        anchorPosArray.getDouble(1).toFloat(),
+                        anchorPosArray.getDouble(2).toFloat()
+                      )
+                      firstAnchorQuat = floatArrayOf(
+                        anchorQuatArray.getDouble(0).toFloat(),
+                        anchorQuatArray.getDouble(1).toFloat(),
+                        anchorQuatArray.getDouble(2).toFloat(),
+                        anchorQuatArray.getDouble(3).toFloat()
+                      )
+                      Log.i(TAG, "First anchor loaded: pos=(${firstAnchorPos[0]}, ${firstAnchorPos[1]}, ${firstAnchorPos[2]})")
+                      break
+                    }
+                  } catch (e: Exception) {
+                    Log.w(TAG, "Failed to parse first JSON object: ${e.message}")
+                  }
+                }
+              }
+            }
+          } catch (e: Exception) {
+            Log.w(TAG, "Failed to read anchor from JSONL: ${e.message}")
+          }
+        }
+        
         val result = uploader.uploadSessionFolder(sessionDir)
         
         result.onSuccess { response ->
           Log.i(TAG, "업로드 성공: ${response.cup_coordinates}, rotation_axis: ${response.rotation_axis}")
           
           activity.runOnUiThread {
+            // 현재 프레임의 앵커 pose 가져오기
+            val currentAnchorPose = getCurrentAnchorPose()
+            
+            // GPU 결과는 월드 좌표(ARCore OpenGL 좌표계)로 반환됨
+            // 기존 로직과 동일하게 월드 좌표를 직접 사용하여 렌더링
+            // GPU에서 프레임 간 드리프트 보정이 이미 적용되어 있음
+            
             // 컵 좌표 표시
             if (response.cup_coordinates != null && response.cup_coordinates.size >= 3) {
-              val x = response.cup_coordinates[0]
-              val y = response.cup_coordinates[1]
-              val z = response.cup_coordinates[2]
-              
-              // 컵 좌표를 AR 화면에 표시
-              createCircleAt(x, y, z)
+              val cupWorld = floatArrayOf(
+                response.cup_coordinates[0],
+                response.cup_coordinates[1],
+                response.cup_coordinates[2]
+              )
+              Log.i(TAG, "Cup world coordinates: (${cupWorld[0]}, ${cupWorld[1]}, ${cupWorld[2]})")
+              createCircleAt(cupWorld[0], cupWorld[1], cupWorld[2])
             }
             
             // 회전축 선 표시
@@ -580,43 +797,53 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
               val topPoint = response.rotation_axis.top_point
               
               if (bottomPoint.size >= 3 && topPoint.size >= 3) {
-                val bottom = floatArrayOf(
+                val bottomWorld = floatArrayOf(
                   bottomPoint[0],
                   bottomPoint[1],
                   bottomPoint[2]
                 )
-                val top = floatArrayOf(
+                val topWorld = floatArrayOf(
                   topPoint[0],
                   topPoint[1],
                   topPoint[2]
                 )
                 
-                // 회전축 선 설정
-                setRotationAxis(bottom, top)
+                Log.i(TAG, "Rotation axis world coordinates: bottom=(${bottomWorld[0]}, ${bottomWorld[1]}, ${bottomWorld[2]}), top=(${topWorld[0]}, ${topWorld[1]}, ${topWorld[2]})")
                 
-                // 회전축의 두 끝점에도 구 표시 (시각적으로 더 명확하게)
-                createCircleAt(bottom[0], bottom[1], bottom[2])
-                createCircleAt(top[0], top[1], top[2])
+                // 월드 좌표를 직접 사용하여 렌더링 (기존 로직과 동일)
+                setRotationAxis(bottomWorld, topWorld)
                 
-                activity.view.statusText.text = "처리 완료! 회전축 표시됨"
-                Log.i(TAG, "Rotation axis set: bottom=(${bottom[0]}, ${bottom[1]}, ${bottom[2]}), top=(${top[0]}, ${top[1]}, ${top[2]})")
+                // 회전축의 두 끝점에도 구 표시
+                createCircleAt(bottomWorld[0], bottomWorld[1], bottomWorld[2])
+                createCircleAt(topWorld[0], topWorld[1], topWorld[2])
+                
+                activity.view.statusText.text = "처리 완료! 회전축 표시됨 (프레임 간 드리프트 보정 적용)"
+                Log.i(TAG, "Rotation axis set: bottom=(${bottomWorld[0]}, ${bottomWorld[1]}, ${bottomWorld[2]}), top=(${topWorld[0]}, ${topWorld[1]}, ${topWorld[2]})")
               } else {
                 activity.view.statusText.text = "처리 완료 (회전축 좌표 오류)"
               }
             } else if (response.cup_coordinates != null && response.cup_coordinates.size >= 3) {
-              val x = response.cup_coordinates[0]
-              val y = response.cup_coordinates[1]
-              val z = response.cup_coordinates[2]
-              activity.view.statusText.text = "처리 완료! 컵: ($x, $y, $z)"
+              activity.view.statusText.text = "처리 완료! 컵 표시됨"
             } else {
               activity.view.statusText.text = "처리 완료 (좌표 없음)"
             }
+            
+            // Clean up anchor after rendering is set up
+            // Anchor is no longer needed once coordinates are transformed and displayed
+            anchor?.detach()
+            anchor = null
+            anchorPose = null
+            Log.i(TAG, "Anchor cleaned up after server upload")
           }
         }.onFailure { error ->
           Log.e(TAG, "업로드 실패", error)
           
           activity.runOnUiThread {
             activity.view.statusText.text = "업로드 실패: ${error.message}"
+            // Clean up anchor even on failure
+            anchor?.detach()
+            anchor = null
+            anchorPose = null
           }
         }
       } catch (e: Exception) {
@@ -731,11 +958,32 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
         )
       }
 
+      // Current anchor pose (for each frame, to track drift)
+      val currentAnchorPose = anchor?.pose
+      val anchorPos = if (currentAnchorPose != null) {
+        "[${currentAnchorPose.tx()}, ${currentAnchorPose.ty()}, ${currentAnchorPose.tz()}]"
+      } else if (anchorPose != null) {
+        // Fallback to first frame anchor if current anchor not available
+        "[${anchorPose!!.tx()}, ${anchorPose!!.ty()}, ${anchorPose!!.tz()}]"
+      } else {
+        "[0.0, 0.0, 0.0]"
+      }
+      val anchorQuat = if (currentAnchorPose != null) {
+        "[${currentAnchorPose.qx()}, ${currentAnchorPose.qy()}, ${currentAnchorPose.qz()}, ${currentAnchorPose.qw()}]"
+      } else if (anchorPose != null) {
+        // Fallback to first frame anchor if current anchor not available
+        "[${anchorPose!!.qx()}, ${anchorPose!!.qy()}, ${anchorPose!!.qz()}, ${anchorPose!!.qw()}]"
+      } else {
+        "[0.0, 0.0, 0.0, 1.0]"
+      }
+      
       val metadata = """
         {
           "t_ns": $timestamp,
           "pos": [${pose.tx()}, ${pose.ty()}, ${pose.tz()}],
           "quat": [${pose.qx()}, ${pose.qy()}, ${pose.qz()}, ${pose.qw()}],
+          "anchor_pos": $anchorPos,
+          "anchor_quat": $anchorQuat,
           "fx": $fx,
           "fy": $fy,
           "cx": $cx,
