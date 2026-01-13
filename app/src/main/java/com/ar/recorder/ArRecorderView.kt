@@ -18,6 +18,7 @@ package com.ar.recorder
 import android.opengl.GLSurfaceView
 import android.view.View
 import android.widget.Button
+import android.widget.EditText
 import android.widget.TextView
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
@@ -30,6 +31,10 @@ class ArRecorderView(val activity: ArRecorderActivity) : DefaultLifecycleObserve
   val startButton = root.findViewById<Button>(R.id.button_start)
   val stopButton = root.findViewById<Button>(R.id.button_stop)
   val statusText = root.findViewById<TextView>(R.id.status_text)
+  val editX = root.findViewById<EditText>(R.id.edit_x)
+  val editY = root.findViewById<EditText>(R.id.edit_y)
+  val editZ = root.findViewById<EditText>(R.id.edit_z)
+  val createCircleButton = root.findViewById<Button>(R.id.button_create_circle)
 
   val session
     get() = activity.arCoreSessionHelper.session
@@ -49,6 +54,17 @@ class ArRecorderView(val activity: ArRecorderActivity) : DefaultLifecycleObserve
       startButton.isEnabled = true
       stopButton.isEnabled = false
       statusText.text = activity.getString(R.string.status_saved)
+    }
+
+    createCircleButton.setOnClickListener {
+      try {
+        val x = editX.text.toString().toFloat()
+        val y = editY.text.toString().toFloat()
+        val z = editZ.text.toString().toFloat()
+        activity.renderer.createCircleAt(x, y, z)
+      } catch (e: NumberFormatException) {
+        snackbarHelper.showError(activity, "올바른 숫자를 입력하세요")
+      }
     }
   }
 

@@ -68,5 +68,104 @@
       android:background="#80000000"
       android:padding="10dp"/>
 
+  <LinearLayout
+      android:layout_width="wrap_content"
+      android:layout_height="wrap_content"
+      android:layout_alignParentTop="true"
+      android:layout_alignParentEnd="true"
+      android:layout_marginTop="30dp"
+      android:layout_marginEnd="20dp"
+      android:orientation="vertical"
+      android:background="#80000000"
+      android:padding="10dp">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="좌표 입력 (m)"
+        android:textColor="#FFFFFF"
+        android:textSize="14sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="5dp"/>
+
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginBottom="5dp">
+      <TextView
+          android:layout_width="20dp"
+          android:layout_height="wrap_content"
+          android:text="X:"
+          android:textColor="#FFFFFF"
+          android:textSize="12sp"/>
+      <EditText
+          android:id="@+id/edit_x"
+          android:layout_width="80dp"
+          android:layout_height="wrap_content"
+          android:inputType="numberSigned|numberDecimal"
+          android:text="0.0"
+          android:textSize="12sp"
+          android:textColor="#000000"
+          android:background="#FFFFFF"
+          android:padding="5dp"/>
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginBottom="5dp">
+      <TextView
+          android:layout_width="20dp"
+          android:layout_height="wrap_content"
+          android:text="Y:"
+          android:textColor="#FFFFFF"
+          android:textSize="12sp"/>
+      <EditText
+          android:id="@+id/edit_y"
+          android:layout_width="80dp"
+          android:layout_height="wrap_content"
+          android:inputType="numberSigned|numberDecimal"
+          android:text="0.0"
+          android:textSize="12sp"
+          android:textColor="#000000"
+          android:background="#FFFFFF"
+          android:padding="5dp"/>
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginBottom="10dp">
+      <TextView
+          android:layout_width="20dp"
+          android:layout_height="wrap_content"
+          android:text="Z:"
+          android:textColor="#FFFFFF"
+          android:textSize="12sp"/>
+      <EditText
+          android:id="@+id/edit_z"
+          android:layout_width="80dp"
+          android:layout_height="wrap_content"
+          android:inputType="numberSigned|numberDecimal"
+          android:text="0.0"
+          android:textSize="12sp"
+          android:textColor="#000000"
+          android:background="#FFFFFF"
+          android:padding="5dp"/>
+    </LinearLayout>
+
+    <Button
+        android:id="@+id/button_create_circle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="구 생성"
+        android:textSize="12sp"
+        android:padding="5dp"/>
+
+  </LinearLayout>
+
 </RelativeLayout>
 

@@ -20,6 +20,7 @@ import android.graphics.Rect
 import android.graphics.YuvImage
 import android.media.Image
 import android.opengl.GLES30
+import android.opengl.Matrix
 import android.util.Log
 import android.view.Surface
 import androidx.lifecycle.DefaultLifecycleObserver
@@ -38,6 +39,10 @@ import com.ar.recorder.common.samplerender.SampleRender
 import com.ar.recorder.common.samplerender.arcore.BackgroundRenderer
 import com.google.ar.core.exceptions.CameraNotAvailableException
 import com.google.ar.core.exceptions.NotYetAvailableException
+import com.ar.recorder.network.SessionUploader
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -51,6 +56,9 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
     val TAG = "ArRecorderRenderer"
     
     private const val SAMPLING_INTERVAL_NS = 200_000_000L // 0.2 seconds (5fps)
+    private const val Z_NEAR = 0.1f
+    private const val Z_FAR = 100.0f
+    private const val SPHERE_RADIUS = 0.01f // 1cm in meters
   }
 
   lateinit var render: SampleRender
@@ -60,6 +68,20 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
   // Viewport dimensions for aspect ratio matching
   private var viewportWidth = 1
   private var viewportHeight = 1
+  
+  // Crosshair for aiming
+  private var crosshairShader: com.ar.recorder.common.samplerender.Shader? = null
+  private var crosshairMesh: com.ar.recorder.common.samplerender.Mesh? = null
+
+  // Sphere rendering
+  private var sphereShader: com.ar.recorder.common.samplerender.Shader? = null
+  private var sphereMesh: com.ar.recorder.common.samplerender.Mesh? = null
+  private val spheres = mutableListOf<FloatArray>() // List of [x, y, z] positions
+  private val projectionMatrix = FloatArray(16)
+  private val viewMatrix = FloatArray(16)
+  private val modelMatrix = FloatArray(16)
+  private val modelViewMatrix = FloatArray(16)
+  private val modelViewProjectionMatrix = FloatArray(16)
 
   // Recording state
   private val isRecording = AtomicBoolean(false)
@@ -91,9 +113,197 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
       // Disable depth visualization and occlusion
       backgroundRenderer.setUseDepthVisualization(render, false)
       backgroundRenderer.setUseOcclusion(render, false)
+      
+      // Create crosshair shader and mesh
+      createCrosshair(render)
+      
+      // Create sphere shader and mesh
+      createSphereMesh(render)
     } catch (e: IOException) {
       Log.e(TAG, "Failed to read a required asset file", e)
       showError("Failed to read a required asset file: $e")
+    }
+  }
+  
+  private fun createSphereMesh(render: SampleRender) {
+    try {
+      // Shader for drawing a colored sphere
+      val vertexShader = """
+        #version 300 es
+        layout(location = 0) in vec3 a_Position;
+        uniform mat4 u_ModelViewProjection;
+        void main() {
+          gl_Position = u_ModelViewProjection * vec4(a_Position, 1.0);
+        }
+      """.trimIndent()
+      
+      val fragmentShader = """
+        #version 300 es
+        precision mediump float;
+        out vec4 fragColor;
+        void main() {
+          fragColor = vec4(0.0, 1.0, 0.0, 1.0); // Green color
+        }
+      """.trimIndent()
+      
+      sphereShader = com.ar.recorder.common.samplerender.Shader(
+        render,
+        vertexShader,
+        fragmentShader,
+        null
+      ).setDepthTest(true).setDepthWrite(true)
+      
+      // Create a sphere mesh using spherical coordinates
+      val numSegments = 32 // Number of segments for latitude and longitude
+      val vertices = mutableListOf<Float>()
+      val indices = mutableListOf<Int>()
+      
+      // Generate vertices
+      for (lat in 0..numSegments) {
+        val theta = lat * Math.PI.toFloat() / numSegments // 0 to PI
+        val sinTheta = kotlin.math.sin(theta)
+        val cosTheta = kotlin.math.cos(theta)
+        
+        for (lon in 0..numSegments) {
+          val phi = lon * 2.0f * Math.PI.toFloat() / numSegments // 0 to 2*PI
+          val sinPhi = kotlin.math.sin(phi)
+          val cosPhi = kotlin.math.cos(phi)
+          
+          // Spherical to Cartesian coordinates
+          val x = SPHERE_RADIUS * sinTheta * cosPhi
+          val y = SPHERE_RADIUS * cosTheta
+          val z = SPHERE_RADIUS * sinTheta * sinPhi
+          
+          vertices.add(x)
+          vertices.add(y)
+          vertices.add(z)
+        }
+      }
+      
+      // Generate indices for triangles
+      for (lat in 0 until numSegments) {
+        for (lon in 0 until numSegments) {
+          val first = lat * (numSegments + 1) + lon
+          val second = first + numSegments + 1
+          
+          // First triangle
+          indices.add(first)
+          indices.add(second)
+          indices.add(first + 1)
+          
+          // Second triangle
+          indices.add(second)
+          indices.add(second + 1)
+          indices.add(first + 1)
+        }
+      }
+      
+      val vertexBuffer = java.nio.ByteBuffer.allocateDirect(vertices.size * 4)
+        .order(java.nio.ByteOrder.nativeOrder())
+        .asFloatBuffer()
+      vertexBuffer.put(vertices.toFloatArray())
+      vertexBuffer.position(0)
+      
+      val vertexBufferObj = com.ar.recorder.common.samplerender.VertexBuffer(
+        render,
+        3,
+        vertexBuffer
+      )
+      
+      val indexBuffer = com.ar.recorder.common.samplerender.IndexBuffer(
+        render,
+        java.nio.ByteBuffer.allocateDirect(indices.size * 4)
+          .order(java.nio.ByteOrder.nativeOrder())
+          .asIntBuffer()
+          .apply { put(indices.toIntArray()); position(0) }
+      )
+      
+      sphereMesh = com.ar.recorder.common.samplerender.Mesh(
+        render,
+        com.ar.recorder.common.samplerender.Mesh.PrimitiveMode.TRIANGLES,
+        indexBuffer,
+        arrayOf(vertexBufferObj)
+      )
+      
+      Log.d(TAG, "Sphere mesh created with ${vertices.size / 3} vertices, ${indices.size / 3} triangles")
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to create sphere mesh", e)
+    }
+  }
+  
+  fun createCircleAt(x: Float, y: Float, z: Float) {
+    spheres.add(floatArrayOf(x, y, z))
+    Log.d(TAG, "Sphere created at ($x, $y, $z)")
+  }
+  
+  private fun createCrosshair(render: SampleRender) {
+    try {
+      // Simple shader for drawing a colored square
+      val vertexShader = """
+        #version 300 es
+        layout(location = 0) in vec2 a_Position;
+        void main() {
+          gl_Position = vec4(a_Position, 0.0, 1.0);
+        }
+      """.trimIndent()
+      
+      val fragmentShader = """
+        #version 300 es
+        precision mediump float;
+        out vec4 fragColor;
+        void main() {
+          fragColor = vec4(1.0, 0.0, 0.0, 1.0); // Red color
+        }
+      """.trimIndent()
+      
+      crosshairShader = com.ar.recorder.common.samplerender.Shader(
+        render,
+        vertexShader,
+        fragmentShader,
+        null
+      ).setDepthTest(false).setDepthWrite(false)
+      
+      // Create a small square at center (0, 0) in NDC coordinates
+      // Size: 4 pixels in each direction (8x8 pixels total)
+      // Convert to NDC: 8 pixels / viewport size
+      val size = 0.01f // Small size in NDC (about 1% of screen)
+      val coords = floatArrayOf(
+        -size, -size,  // Bottom-left
+         size, -size,  // Bottom-right
+        -size,  size,  // Top-left
+         size,  size   // Top-right
+      )
+      
+      val coordBuffer = java.nio.ByteBuffer.allocateDirect(coords.size * 4)
+        .order(java.nio.ByteOrder.nativeOrder())
+        .asFloatBuffer()
+      coordBuffer.put(coords)
+      coordBuffer.position(0)
+      
+      val vertexBuffer = com.ar.recorder.common.samplerender.VertexBuffer(
+        render,
+        2,
+        coordBuffer
+      )
+      
+      // Create index buffer for triangle strip
+      val indices = intArrayOf(0, 1, 2, 3)
+      val indexBuffer = com.ar.recorder.common.samplerender.IndexBuffer(
+        render,
+        java.nio.ByteBuffer.allocateDirect(indices.size * 4)
+          .order(java.nio.ByteOrder.nativeOrder())
+          .asIntBuffer()
+          .apply { put(indices); position(0) }
+      )
+      
+      crosshairMesh = com.ar.recorder.common.samplerender.Mesh(
+        render,
+        com.ar.recorder.common.samplerender.Mesh.PrimitiveMode.TRIANGLE_STRIP,
+        indexBuffer,
+        arrayOf(vertexBuffer)
+      )
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to create crosshair", e)
     }
   }
 
@@ -136,6 +346,39 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
     // Draw background
     if (frame.timestamp != 0L) {
       backgroundRenderer.drawBackground(render)
+    }
+    
+    // Draw crosshair at center
+    crosshairShader?.let { shader ->
+      crosshairMesh?.let { mesh ->
+        render.draw(mesh, shader)
+      }
+    }
+
+    // Draw spheres in 3D space
+    if (camera.trackingState == TrackingState.TRACKING && spheres.isNotEmpty()) {
+      // Get projection and view matrices
+      camera.getProjectionMatrix(projectionMatrix, 0, Z_NEAR, Z_FAR)
+      camera.getViewMatrix(viewMatrix, 0)
+      
+      sphereShader?.let { shader ->
+        sphereMesh?.let { mesh ->
+          for (spherePos in spheres) {
+            // Create model matrix (translation to sphere position)
+            // Spheres don't need rotation since they look the same from all angles
+            Matrix.setIdentityM(modelMatrix, 0)
+            Matrix.translateM(modelMatrix, 0, spherePos[0], spherePos[1], spherePos[2])
+            
+            // Calculate MVP matrix
+            Matrix.multiplyMM(modelViewMatrix, 0, viewMatrix, 0, modelMatrix, 0)
+            Matrix.multiplyMM(modelViewProjectionMatrix, 0, projectionMatrix, 0, modelViewMatrix, 0)
+            
+            // Set uniform and draw
+            shader.setMat4("u_ModelViewProjection", modelViewProjectionMatrix)
+            render.draw(mesh, shader)
+          }
+        }
+      }
     }
 
     // Sample frame if recording and tracking
@@ -187,12 +430,66 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
       metadataFile?.close()
       metadataFile = null
 
-      Log.i(TAG, "Recording stopped: ${outputDir?.absolutePath}")
+      val sessionDir = outputDir
+      Log.i(TAG, "Recording stopped: ${sessionDir?.absolutePath}")
+      
       activity.runOnUiThread {
-        activity.view.statusText.text = activity.getString(R.string.status_saved)
+        activity.view.statusText.text = "업로드 중..."
+      }
+      
+      // 서버에 업로드
+      if (sessionDir != null && sessionDir.exists()) {
+        uploadSessionToServer(sessionDir)
+      } else {
+        activity.runOnUiThread {
+          activity.view.statusText.text = activity.getString(R.string.status_saved)
+        }
       }
     } catch (e: Exception) {
       Log.e(TAG, "Failed to stop recording", e)
+      activity.runOnUiThread {
+        activity.view.statusText.text = "저장 실패: ${e.message}"
+      }
+    }
+  }
+  
+  private fun uploadSessionToServer(sessionDir: File) {
+    val uploader = SessionUploader()
+    
+    CoroutineScope(Dispatchers.IO).launch {
+      try {
+        val result = uploader.uploadSessionFolder(sessionDir)
+        
+        result.onSuccess { response ->
+          Log.i(TAG, "업로드 성공: ${response.cup_coordinates}")
+          
+          activity.runOnUiThread {
+            if (response.cup_coordinates != null && response.cup_coordinates.size >= 3) {
+              val x = response.cup_coordinates[0]
+              val y = response.cup_coordinates[1]
+              val z = response.cup_coordinates[2]
+              
+              // 컵 좌표를 AR 화면에 표시
+              createCircleAt(x, y, z)
+              
+              activity.view.statusText.text = "처리 완료! 컵: ($x, $y, $z)"
+            } else {
+              activity.view.statusText.text = "처리 완료 (좌표 없음)"
+            }
+          }
+        }.onFailure { error ->
+          Log.e(TAG, "업로드 실패", error)
+          
+          activity.runOnUiThread {
+            activity.view.statusText.text = "업로드 실패: ${error.message}"
+          }
+        }
+      } catch (e: Exception) {
+        Log.e(TAG, "업로드 중 예외 발생", e)
+        activity.runOnUiThread {
+          activity.view.statusText.text = "업로드 오류: ${e.message}"
+        }
+      }
     }
   }
 
@@ -254,14 +551,50 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
         yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), 90, out)
       }
 
-      // 원본 intrinsics 그대로 사용 (조정 없음)
+      // Intrinsics 이미지 크기 확인 및 검증
+      val intrinsicsSize = intrinsics.getImageDimensions()
+      val intrinsicsWidth = intrinsicsSize[0]
+      val intrinsicsHeight = intrinsicsSize[1]
+      
       val focalLength = intrinsics.getFocalLength()
       val principalPoint = intrinsics.getPrincipalPoint()
       
-      val fx = focalLength[0]
-      val fy = focalLength[1]
-      val cx = principalPoint[0]
-      val cy = principalPoint[1]
+      // Intrinsics 크기와 실제 이미지 크기 비교
+      val fx: Float
+      val fy: Float
+      val cx: Float
+      val cy: Float
+      
+      if (intrinsicsWidth != image.width || intrinsicsHeight != image.height) {
+        // 크기가 다르면 스케일링 필요
+        val scaleX = image.width.toFloat() / intrinsicsWidth
+        val scaleY = image.height.toFloat() / intrinsicsHeight
+        
+        fx = focalLength[0] * scaleX
+        fy = focalLength[1] * scaleY
+        cx = principalPoint[0] * scaleX
+        cy = principalPoint[1] * scaleY
+        
+        Log.w(
+          TAG,
+          "⚠️ Intrinsics와 이미지 크기 불일치! " +
+          "Intrinsics: ${intrinsicsWidth}x${intrinsicsHeight}, " +
+          "Image: ${image.width}x${image.height}, " +
+          "Scale: ${scaleX}x${scaleY}"
+        )
+      } else {
+        // 크기가 같으면 그대로 사용
+        fx = focalLength[0]
+        fy = focalLength[1]
+        cx = principalPoint[0]
+        cy = principalPoint[1]
+        
+        Log.d(
+          TAG,
+          "Intrinsics size: ${intrinsicsWidth}x${intrinsicsHeight}, " +
+          "Image size: ${image.width}x${image.height} (일치)"
+        )
+      }
 
       val metadata = """
         {
@@ -274,6 +607,8 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
           "cy": $cy,
           "w": ${image.width},
           "h": ${image.height},
+          "intrinsics_w": $intrinsicsWidth,
+          "intrinsics_h": $intrinsicsHeight,
           "display_rotation": $displayRotation
         }
       """.trimIndent()

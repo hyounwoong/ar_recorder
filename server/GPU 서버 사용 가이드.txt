@@ -1,0 +1,191 @@
+# GPU 서버 사용 가이드
+
+# 1. 문서 개요
+
+AI Stages는 머신러닝/AI 모델 학습을 위한 최적의 GPU 학습 서버 환경을 제공합니다. 본 문서에서는 다룰 내용의 범위는 아래와 같습니다
+
+- SSH 키 생성하기
+- GPU 서버 생성하기
+- 서버 접속하기
+- 서버 종료하기
+
+VPN 프로그램 설치 및 사용부터, GPU 서버 사용 전반에 대한 내용은 아래 가이드 영상을 참고해주세요.
+
+- [**AI Stages GPU 서버 사용 가이드 영상**](https://drive.google.com/file/d/1TQT6V4NikvwZkU4PluwxR9hnwNR-JC_m/view)
+
+# 2. GPU 서버
+
+**서버 사용시 일반적인 주의사항**
+
+<aside>
+⚠️ GPU 서버는 머신러닝 개발을 위한 VM이 아니라 머신러닝 학습을 위해 최적화된 Docker 환경입니다. 학습과 관련이 없는 시스템 변경은 할 수 없도록 보호되고 있습니다.
+
+</aside>
+
+<aside>
+⚠️ AI Stages는 안정적인 시스템 운영을 위해서 Docker 환경에서 동작하기 때문에 Docker 설치와 사용이 불가합니다.
+
+</aside>
+
+<aside>
+⚠️ Nvidia, CUDA 관련 드라이버와 패키지는 사전에 설치되어 있습니다. 다시 설치할 필요 없고 설치할 경우 정상 동작을 보장할 수 없습니다. (pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime 이미지를 기반으로 제작되어 있습니다)
+
+</aside>
+
+## 2.1 SSH Key 생성
+
+GPU 서버를 생성하기 위해서는 사전에 SSH 키를 생성해야 합니다. 키를 분실할 경우 서버에 접속이 어려우니 서버를 종료 후 다시 생성합니다.
+
+![Untitled](https://prod-files-secure.s3.us-west-2.amazonaws.com/370624b0-149e-4e24-ac2d-cc8d87d63ad0/e8693f5d-63bd-4545-b46b-c4bcbe71cff7/Untitled.png)
+
+## 2.2 GPU 서버 생성
+
+![내 서버 목록](https://prod-files-secure.s3.us-west-2.amazonaws.com/370624b0-149e-4e24-ac2d-cc8d87d63ad0/0cda7090-98ab-4748-8acf-8f2dd75b1c82/Untitled.png)
+
+내 서버 목록
+
+`대회 > 서버 > 내 서버` 메뉴로 이동하면 현재 내가 생성한 서버의 목록을 확인할 수 있고, 새로운 서버를 생성할 수 있습니다. 여기서 `새 서버 생성` 버튼을 누르면 아래와 같은 화면을 볼 수 있습니다.
+
+![새 서버 생성 화면](https://prod-files-secure.s3.us-west-2.amazonaws.com/370624b0-149e-4e24-ac2d-cc8d87d63ad0/86871b76-8bc7-431c-8c16-984d9dfb55ae/Untitled.png)
+
+새 서버 생성 화면
+
+- 서버 이름: 생성할 서버 이름을 기입합니다. 서버 종료시에도 활용됩니다.
+- 포트 개수: ~~사용하고자 하는 포트 개수를 지정합니다. (2/4/8)~~ 보안 이슈로 VPN을 도입하였으며, 포트를 지정하더라도 외부 통신은 제한되니 참고 부탁드립니다.
+- SSH 키: 서버 생성시 연결할 SSH 키를 지정합니다.
+
+![Screenshot 2024-02-16 at 1.48.17 PM.png](https://prod-files-secure.s3.us-west-2.amazonaws.com/370624b0-149e-4e24-ac2d-cc8d87d63ad0/22e5f0c6-a8d7-4af4-b692-fada9e2549f0/Screenshot_2024-02-16_at_1.48.17_PM.png)
+
+서버 생성시 다운로드 받게 되는 `aistages.pem` 파일은 GPU 서버에 SSH로 접속할 때 사용하는데 **참고로** **서버 생성시 단 1회만 다운로드 받을 수 있습니다.**
+
+![Untitled](https://prod-files-secure.s3.us-west-2.amazonaws.com/370624b0-149e-4e24-ac2d-cc8d87d63ad0/b849eee9-7fe2-421c-9f28-f922a1fd7339/Untitled.png)
+
+잠시 기다리면 위 화면과 같이 정상적으로 서버가 생성되고 서버 접속을 위한 정보가 제공됩니다.
+
+## 2.3 GPU 서버 접속
+
+<aside>
+ℹ️ **서버 접속을 위해서는 반드시 VPN에 먼저 연결해야 합니다.**
+
+</aside>
+
+생성한 서버에는 터미널에서 SSH 명령을 이용해서 접속할 수 있습니다.
+
+![Screenshot 2024-02-16 at 4.44.21 PM.png](https://prod-files-secure.s3.us-west-2.amazonaws.com/370624b0-149e-4e24-ac2d-cc8d87d63ad0/3f9e2ff8-716e-46ed-bac0-68c038845436/Screenshot_2024-02-16_at_4.44.21_PM.png)
+
+위 이미지와 같이 ssh로 접속한 후에는 Ubuntu 20.04 으로 제공된 환경에서 GPU를 이용할 수 있습니다.
+
+## 2.4 **가상환경 세팅 (서버 내)**
+
+<aside>
+⚠️ **주의:** 아래 명령어와 경로는 예시이나 **부스트캠프 AI Tech** **교육 한정해서는** GPU 서버 접속 직후에는 루트 디스크 용량이 부족하므로, 반드시 `/data/ephemeral/home` 경로 아래에 가상환경(venv)을 만들어 진행합니다. (해당 경로에는 50GB 디스크 용량이 제공됩니다)
+용량을 초과하여 사용하게 될 경우 시스템 안정성을 위해 서버가 강제 종료되며 내부 작업 파일은 모두 소실되며 복원은 불가합니다. 상시 자료는 백업하며 용량은 터미널에서 아래 명령어를 통해 확인할 수 있습니다. **`df -H`**
+
+</aside>
+
+아래 과정을 통해 개인별 Python 실행 환경을 분리하고 필요한 패키지를 설치할 수 있습니다.
+
+### 1) 가상환경 생성
+
+```bash
+python3.10 -m venv /data/ephemeral/home/py310
+```
+
+### 2) 가상환경 활성화
+
+```bash
+source /data/ephemeral/home/py310/bin/activate
+```
+
+> 참고: 활성화 후 (py310) 표시가 프롬프트에 보이면 정상 진입 상태입니다.
+> 
+
+<aside>
+💡
+
+서버 ~/.bashrc 파일 하단에 `source /data/ephemeral/home/py310/bin/activate`  를 추가해두면 서버에 bash로 접속시 자동으로 가상환경을 활성화할 수 있습니다.
+
+</aside>
+
+### 3) 필수 패키지 설치
+
+```bash
+pip install --upgrade pip
+pip install jupyter ipykernel
+```
+
+## **2.5 VS code를 통한 SSH 리모트 접속 및 Jupyter 사용**
+
+아래 과정을 통해 등록된 커널을 VS Code에서 선택해 Jupyter Notebook 실습을 안정적으로 진행할 수 있습니다.
+
+### VS Code 설치 안내
+
+VS Code(Visual Studio Code)는 아래 공식 페이지에서 운영체제에 맞게 설치할 수 있습니다.
+
+👉 https://code.visualstudio.com/download
+
+> 💡 참고: 본 가이드에서는 VS Code를 예시 IDE로 사용하였으며, 동일한 SSH 연결 및 Jupyter 환경을 지원하는 다른 IDE(예: PyCharm 등)를 사용해도 무방합니다.
+> 
+
+### 1) 로컬 PC에서 VS Code 확장 설치
+
+VS Code에서 아래 세 가지를 설치합니다.
+
+- **Remote – SSH** *(ms-vscode-remote.remote-ssh)*
+- **Python** *(ms-python.python)*
+- **Jupyter** *(ms-toolsai.jupyter)*
+
+### 2) 서버에 Remote-SSH로 접속
+
+- `Cmd/Ctrl + Shift + P` → **Remote-SSH: Connect to Host…**
+- 대상 호스트 선택(최초 1회는 **Add New SSH Host…** 로 등록 진행)
+    
+    ```jsx
+    ssh -i /절대경로/test.pem -p 30514 root@10.196.197.20
+    
+    예시:
+    /Users/username/Downloads/test.pem (Mac)
+    C:\Users\username\Downloads\test.pem (Windows PowerShell 경로 표기 주의)
+    ```
+    
+    <aside>
+    💡
+    
+    주의사항
+    
+    - `.pem` 키 파일의 경로를 **반드시 정확히 입력**해야 합니다.
+    - 상대경로(`./test.pem`)나 잘못된 경로를 입력하면, SSH가 인증키를 찾지 못해 비밀번호(password) 입력을 요구합니다.
+    - 경로에 공백이 포함되어 있다면 반드시 따옴표("") 로 감싸주세요.
+    </aside>
+    
+- 좌하단 녹색 바에 `SSH: <호스트명>` 표시가 뜨면 원격 창입니다.
+
+### **3) Python 인터프리터를 가상환경으로 지정**
+
+1. `Cmd/Ctrl + Shift + P` → **Python: Select Interpreter**
+2. 목록에서 `/data/ephemeral/home/py310/bin/python` 선택 (필요 시 VS Code가 ipykernel 설치를 제안하면 Install)
+
+### **4) Jupyter 열기 & 커널 선택**
+
+- 기존 `.ipynb` 파일을 열거나 `Cmd/Ctrl + Shift + P` → **Jupyter: Create New Blank Notebook**
+- 우측 상단 Select Kernel → Python Environments 탭에서
+    
+    `/data/ephemeral/home/py310/bin/python`(= “Python (py310)”) 선택
+    
+
+> 참고: 별도 브라우저/토큰/포트포워딩 없음. VS Code가 원격 Jupyter를 자동 관리합니다.
+> 
+
+## 2.6 GPU 서버 종료
+
+![Untitled](https://prod-files-secure.s3.us-west-2.amazonaws.com/370624b0-149e-4e24-ac2d-cc8d87d63ad0/d8fc7f30-d41a-4682-b3d6-ab845c39cb48/Untitled.png)
+
+사용이 완료된 서버는 화면과 같이 X 버튼을 눌러서 종료시킬 수 있습니다. 
+
+![Untitled](https://prod-files-secure.s3.us-west-2.amazonaws.com/370624b0-149e-4e24-ac2d-cc8d87d63ad0/6dda10ca-e7db-4eec-8b6b-8b6d7332c4e2/Untitled.png)
+
+서버 생성시 입력한 서버 이름을 정확히 입력한 뒤 `종료` 버튼을 눌러서 종료합니다.
+
+![Untitled](https://prod-files-secure.s3.us-west-2.amazonaws.com/370624b0-149e-4e24-ac2d-cc8d87d63ad0/91e714f1-b47a-4e81-b886-5fa70807bfc2/Untitled.png)
+
+정상적으로 종료된 서버는 우측 상단에 ‘종료됨’으로 표시되며 서버 내부에 있던 자료 및 파일은 모두 소실됩니다.
