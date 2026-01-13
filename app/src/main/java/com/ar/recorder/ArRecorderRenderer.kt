@@ -77,6 +77,12 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
   private var sphereShader: com.ar.recorder.common.samplerender.Shader? = null
   private var sphereMesh: com.ar.recorder.common.samplerender.Mesh? = null
   private val spheres = mutableListOf<FloatArray>() // List of [x, y, z] positions
+  
+  // Line rendering for rotation axis
+  private var lineShader: com.ar.recorder.common.samplerender.Shader? = null
+  private var rotationAxisBottom: FloatArray? = null // [x, y, z]
+  private var rotationAxisTop: FloatArray? = null // [x, y, z]
+  
   private val projectionMatrix = FloatArray(16)
   private val viewMatrix = FloatArray(16)
   private val modelMatrix = FloatArray(16)
@@ -119,6 +125,9 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
       
       // Create sphere shader and mesh
       createSphereMesh(render)
+      
+      // Create line shader for rotation axis
+      createLineShader(render)
     } catch (e: IOException) {
       Log.e(TAG, "Failed to read a required asset file", e)
       showError("Failed to read a required asset file: $e")
@@ -234,6 +243,46 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
   fun createCircleAt(x: Float, y: Float, z: Float) {
     spheres.add(floatArrayOf(x, y, z))
     Log.d(TAG, "Sphere created at ($x, $y, $z)")
+  }
+  
+  private fun createLineShader(render: SampleRender) {
+    try {
+      // Shader for drawing a line
+      val vertexShader = """
+        #version 300 es
+        layout(location = 0) in vec3 a_Position;
+        uniform mat4 u_ModelViewProjection;
+        void main() {
+          gl_Position = u_ModelViewProjection * vec4(a_Position, 1.0);
+        }
+      """.trimIndent()
+      
+      val fragmentShader = """
+        #version 300 es
+        precision mediump float;
+        out vec4 fragColor;
+        void main() {
+          fragColor = vec4(1.0, 0.0, 0.0, 1.0); // Red color for rotation axis
+        }
+      """.trimIndent()
+      
+      lineShader = com.ar.recorder.common.samplerender.Shader(
+        render,
+        vertexShader,
+        fragmentShader,
+        null
+      ).setDepthTest(true).setDepthWrite(true)
+      
+      Log.d(TAG, "Line shader created for rotation axis")
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to create line shader", e)
+    }
+  }
+  
+  fun setRotationAxis(bottomPoint: FloatArray, topPoint: FloatArray) {
+    rotationAxisBottom = bottomPoint
+    rotationAxisTop = topPoint
+    Log.d(TAG, "Rotation axis set: bottom=(${bottomPoint[0]}, ${bottomPoint[1]}, ${bottomPoint[2]}), top=(${topPoint[0]}, ${topPoint[1]}, ${topPoint[2]})")
   }
   
   private fun createCrosshair(render: SampleRender) {
@@ -380,6 +429,57 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
         }
       }
     }
+    
+    // Draw rotation axis line
+    if (camera.trackingState == TrackingState.TRACKING && 
+        rotationAxisBottom != null && rotationAxisTop != null) {
+      camera.getProjectionMatrix(projectionMatrix, 0, Z_NEAR, Z_FAR)
+      camera.getViewMatrix(viewMatrix, 0)
+      
+      lineShader?.let { shader ->
+        // Create line mesh dynamically (like spheres)
+        val vertices = floatArrayOf(
+          rotationAxisBottom!![0], rotationAxisBottom!![1], rotationAxisBottom!![2],
+          rotationAxisTop!![0], rotationAxisTop!![1], rotationAxisTop!![2]
+        )
+        
+        val vertexBuffer = java.nio.ByteBuffer.allocateDirect(vertices.size * 4)
+          .order(java.nio.ByteOrder.nativeOrder())
+          .asFloatBuffer()
+        vertexBuffer.put(vertices)
+        vertexBuffer.position(0)
+        
+        val vertexBufferObj = com.ar.recorder.common.samplerender.VertexBuffer(
+          render,
+          3,
+          vertexBuffer
+        )
+        
+        val indices = intArrayOf(0, 1)
+        val indexBuffer = com.ar.recorder.common.samplerender.IndexBuffer(
+          render,
+          java.nio.ByteBuffer.allocateDirect(indices.size * 4)
+            .order(java.nio.ByteOrder.nativeOrder())
+            .asIntBuffer()
+            .apply { put(indices); position(0) }
+        )
+        
+        val lineMesh = com.ar.recorder.common.samplerender.Mesh(
+          render,
+          com.ar.recorder.common.samplerender.Mesh.PrimitiveMode.LINES,
+          indexBuffer,
+          arrayOf(vertexBufferObj)
+        )
+        
+        // Draw line
+        Matrix.setIdentityM(modelMatrix, 0)
+        Matrix.multiplyMM(modelViewMatrix, 0, viewMatrix, 0, modelMatrix, 0)
+        Matrix.multiplyMM(modelViewProjectionMatrix, 0, projectionMatrix, 0, modelViewMatrix, 0)
+        
+        shader.setMat4("u_ModelViewProjection", modelViewProjectionMatrix)
+        render.draw(lineMesh, shader)
+      }
+    }
 
     // Sample frame if recording and tracking
     if (isRecording.get() && camera.trackingState == TrackingState.TRACKING) {
@@ -461,9 +561,10 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
         val result = uploader.uploadSessionFolder(sessionDir)
         
         result.onSuccess { response ->
-          Log.i(TAG, "업로드 성공: ${response.cup_coordinates}")
+          Log.i(TAG, "업로드 성공: ${response.cup_coordinates}, rotation_axis: ${response.rotation_axis}")
           
           activity.runOnUiThread {
+            // 컵 좌표 표시
             if (response.cup_coordinates != null && response.cup_coordinates.size >= 3) {
               val x = response.cup_coordinates[0]
               val y = response.cup_coordinates[1]
@@ -471,7 +572,41 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
               
               // 컵 좌표를 AR 화면에 표시
               createCircleAt(x, y, z)
+            }
+            
+            // 회전축 선 표시
+            if (response.rotation_axis != null) {
+              val bottomPoint = response.rotation_axis.bottom_point
+              val topPoint = response.rotation_axis.top_point
               
+              if (bottomPoint.size >= 3 && topPoint.size >= 3) {
+                val bottom = floatArrayOf(
+                  bottomPoint[0],
+                  bottomPoint[1],
+                  bottomPoint[2]
+                )
+                val top = floatArrayOf(
+                  topPoint[0],
+                  topPoint[1],
+                  topPoint[2]
+                )
+                
+                // 회전축 선 설정
+                setRotationAxis(bottom, top)
+                
+                // 회전축의 두 끝점에도 구 표시 (시각적으로 더 명확하게)
+                createCircleAt(bottom[0], bottom[1], bottom[2])
+                createCircleAt(top[0], top[1], top[2])
+                
+                activity.view.statusText.text = "처리 완료! 회전축 표시됨"
+                Log.i(TAG, "Rotation axis set: bottom=(${bottom[0]}, ${bottom[1]}, ${bottom[2]}), top=(${top[0]}, ${top[1]}, ${top[2]})")
+              } else {
+                activity.view.statusText.text = "처리 완료 (회전축 좌표 오류)"
+              }
+            } else if (response.cup_coordinates != null && response.cup_coordinates.size >= 3) {
+              val x = response.cup_coordinates[0]
+              val y = response.cup_coordinates[1]
+              val z = response.cup_coordinates[2]
               activity.view.statusText.text = "처리 완료! 컵: ($x, $y, $z)"
             } else {
               activity.view.statusText.text = "처리 완료 (좌표 없음)"

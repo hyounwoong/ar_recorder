@@ -28,11 +28,20 @@ data class HealthResponse(
 )
 
 /**
+ * 회전축 데이터
+ */
+data class RotationAxis(
+    val bottom_point: List<Float>,
+    val top_point: List<Float>
+)
+
+/**
  * 세션 처리 응답
  */
 data class ProcessSessionResponse(
     val success: Boolean,
     val cup_coordinates: List<Float>? = null,
+    val rotation_axis: RotationAxis? = null,
     val error: String? = null,
     val message: String? = null
 )

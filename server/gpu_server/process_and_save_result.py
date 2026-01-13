@@ -728,12 +728,14 @@ if __name__ == "__main__":
     
     # DA3 추론
     print(f"[GPU] Depth-Anything-3 모델 로딩 중...", flush=True)
+    model_load_start = time.time()
     project_root = os.path.dirname(base_folder)
     output_dir = os.path.join(project_root, "output")
     os.makedirs(output_dir, exist_ok=True)
     
     model = DepthAnything3.from_pretrained("depth-anything/da3-giant").to("cuda")
-    print(f"[GPU] 모델 로딩 완료", flush=True)
+    model_load_time = time.time() - model_load_start
+    print(f"[GPU] 모델 로딩 완료 ({model_load_time:.2f}초)", flush=True)
     
     print(f"[GPU] DA3 추론 시작 (이미지 {len(matched_image_files)}개)...", flush=True)
     inference_start = time.time()
