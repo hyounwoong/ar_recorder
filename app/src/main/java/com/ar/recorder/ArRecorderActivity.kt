@@ -89,6 +89,8 @@ class ArRecorderActivity : AppCompatActivity() {
       session.config.apply {
         // Enable autofocus for better image quality
         focusMode = Config.FocusMode.AUTO
+        // Enable plane detection for hit testing
+        planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
       }
     )
   }
