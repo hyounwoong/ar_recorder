@@ -112,6 +112,10 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
   private var anchor: Anchor? = null  // ARCore Anchor object
   private var anchorPose: Pose? = null  // First frame anchor pose (for JSONL)
   
+  // First frame anchor info for coordinate transformation
+  private var firstAnchorPos: FloatArray? = null  // First frame anchor position
+  private var firstAnchorQuat: FloatArray? = null  // First frame anchor quaternion
+  
   // New anchor for rotation axis (to be created in GL thread)
   private var newAnchorCenter: FloatArray? = null  // Center point for new anchor
   
@@ -774,9 +778,16 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
     
     // Draw rotation axis line
     if (camera.trackingState == TrackingState.TRACKING && rotationAxisBottom != null && rotationAxisTop != null) {
-      // GPU 좌표를 그대로 사용 (앵커 기준 변환 제거)
-      val bottomPoint = rotationAxisBottom!!
-      val topPoint = rotationAxisTop!!
+      // GPU 좌표는 첫 프레임 앵커 기준 월드 좌표(W0)이므로, 현재 앵커 기준으로 변환
+      var bottomPoint = rotationAxisBottom!!
+      var topPoint = rotationAxisTop!!
+      
+      // 현재 앵커 pose로 보정 적용
+      val currentAnchorPose = getCurrentAnchorPose()
+      if (currentAnchorPose != null && firstAnchorPos != null && firstAnchorQuat != null) {
+        bottomPoint = transformW0ToCurrentWorld(bottomPoint, firstAnchorPos!!, firstAnchorQuat!!, currentAnchorPose)
+        topPoint = transformW0ToCurrentWorld(topPoint, firstAnchorPos!!, firstAnchorQuat!!, currentAnchorPose)
+      }
       
       camera.getProjectionMatrix(projectionMatrix, 0, Z_NEAR, Z_FAR)
       camera.getViewMatrix(viewMatrix, 0)
@@ -1012,9 +1023,7 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
       try {
         // 첫 프레임 앵커 정보 읽기
         val jsonlFiles = sessionDir.listFiles { _, name -> name.endsWith(".jsonl") }
-        var firstAnchorPos: FloatArray? = null
-        var firstAnchorQuat: FloatArray? = null
-        
+        // JSONL에서 첫 프레임 앵커 정보 읽기
         if (jsonlFiles != null && jsonlFiles.isNotEmpty()) {
           try {
             val jsonlFile = jsonlFiles[0]
@@ -1047,7 +1056,7 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
                         anchorQuatArray.getDouble(2).toFloat(),
                         anchorQuatArray.getDouble(3).toFloat()
                       )
-                      Log.i(TAG, "First anchor loaded: pos=(${firstAnchorPos[0]}, ${firstAnchorPos[1]}, ${firstAnchorPos[2]})")
+                      Log.i(TAG, "First anchor loaded from JSONL: pos=(${firstAnchorPos!![0]}, ${firstAnchorPos!![1]}, ${firstAnchorPos!![2]})")
                       break
                     }
                   } catch (e: Exception) {
@@ -1067,7 +1076,8 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
           Log.i(TAG, "업로드 성공: ${response.cup_coordinates}, rotation_axis: ${response.rotation_axis}")
           
           activity.runOnUiThread {
-            // GPU 서버에서 계산한 좌표를 그대로 사용 (앵커 기준 보정 제거)
+            // GPU 서버에서 계산한 좌표는 첫 프레임 앵커 기준 월드 좌표(W0)
+            // 렌더링 시 현재 앵커 pose로 보정하여 사용
             if (response.rotation_axis != null) {
               val bottomPoint = response.rotation_axis.bottom_point
               val topPoint = response.rotation_axis.top_point
@@ -1084,15 +1094,28 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
                   topPoint[2]
                 )
                 
-                Log.i(TAG, "GPU result (direct use, no anchor correction): bottom=(${bottomWorld[0]}, ${bottomWorld[1]}, ${bottomWorld[2]}), top=(${topWorld[0]}, ${topWorld[1]}, ${topWorld[2]})")
+                Log.i(TAG, "GPU result (W0 coordinates): bottom=(${bottomWorld[0]}, ${bottomWorld[1]}, ${bottomWorld[2]}), top=(${topWorld[0]}, ${topWorld[1]}, ${topWorld[2]})")
                 
-                // GPU 좌표를 그대로 사용 (월드 좌표로 저장)
+                // GPU 좌표를 W0 좌표로 저장 (렌더링 시 현재 앵커로 보정)
                 setRotationAxis(bottomWorld, topWorld)
-                createCircleAt(bottomWorld[0], bottomWorld[1], bottomWorld[2])
-                createCircleAt(topWorld[0], topWorld[1], topWorld[2])
                 
-                activity.view.statusText.text = "처리 완료! 회전축 표시됨 (GPU 좌표 직접 사용)"
-                Log.i(TAG, "Rotation axis set with GPU coordinates (no anchor correction)")
+                // 첫 프레임 앵커 정보 저장 (보정에 사용)
+                if (firstAnchorPos == null || firstAnchorQuat == null) {
+                  val currentAnchor = anchor
+                  if (currentAnchor != null && currentAnchor.trackingState == TrackingState.TRACKING) {
+                    val anchorPose = currentAnchor.pose
+                    firstAnchorPos = floatArrayOf(anchorPose.tx(), anchorPose.ty(), anchorPose.tz())
+                    firstAnchorQuat = floatArrayOf(anchorPose.qx(), anchorPose.qy(), anchorPose.qz(), anchorPose.qw())
+                    Log.i(TAG, "First anchor info saved for coordinate correction: pos=(${firstAnchorPos!![0]}, ${firstAnchorPos!![1]}, ${firstAnchorPos!![2]})")
+                  } else if (anchorPose != null) {
+                    firstAnchorPos = floatArrayOf(anchorPose!!.tx(), anchorPose!!.ty(), anchorPose!!.tz())
+                    firstAnchorQuat = floatArrayOf(anchorPose!!.qx(), anchorPose!!.qy(), anchorPose!!.qz(), anchorPose!!.qw())
+                    Log.i(TAG, "First anchor info saved from anchorPose: pos=(${firstAnchorPos!![0]}, ${firstAnchorPos!![1]}, ${firstAnchorPos!![2]})")
+                  }
+                }
+                
+                activity.view.statusText.text = "처리 완료! 회전축 표시됨 (앵커 드리프트 보정 적용)"
+                Log.i(TAG, "Rotation axis set with W0 coordinates (will be corrected with current anchor during rendering)")
               } else {
                 activity.view.statusText.text = "처리 완료 (회전축 좌표 오류)"
               }
@@ -1119,6 +1142,8 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
             anchor?.detach()
             anchor = null
             anchorPose = null
+            firstAnchorPos = null
+            firstAnchorQuat = null
           }
         }
       } catch (e: Exception) {

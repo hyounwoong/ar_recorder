@@ -513,6 +513,103 @@ def transform_point_to_arcore(point_scene, first_frame_params, scene_metadata=No
     
     return point_arcore_world_gl
 
+def transform_point_from_arcore(point_arcore, first_frame_params, scene_metadata=None):
+    """
+    ARCore 월드 좌표계의 점을 중력 정렬 씬 좌표계로 변환 (transform_point_to_arcore의 역변환)
+    
+    변환 경로 (역순):
+    1. ARCore 월드 좌표계 → 첫 프레임 카메라 기준 좌표계 (w2c)
+    2. 첫 프레임 카메라 기준 좌표계 → hf_alignment 적용 씬 (T_camera_origin 역변환)
+    3. hf_alignment 적용 씬 → 중력 정렬 씬 (T)
+    
+    Args:
+        point_arcore: ARCore 월드 좌표계의 점 [x, y, z] (OpenGL 좌표계)
+        first_frame_params: 첫 프레임의 ARCore pose 정보 (quat, pos 포함)
+        scene_metadata: 씬 메타데이터 (hf_alignment 포함)
+    
+    Returns:
+        중력 정렬 씬 좌표계의 점 [x, y, z]
+    """
+    point_arcore = np.array(point_arcore, dtype=np.float32)
+    
+    if scene_metadata is None:
+        raise ValueError("scene_metadata is required")
+    
+    A = np.array(scene_metadata.get('hf_alignment', np.eye(4))).reshape(4, 4)
+    
+    # 중력 벡터 계산 (hf_alignment 적용 씬 좌표계에서)
+    gl_to_cv = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]])
+    arcore_y = np.array([0, 1, 0])
+    gravity = (A[:3, :3] @ gl_to_cv @ arcore_y)
+    gravity = gravity / np.linalg.norm(gravity)
+    
+    # 중력 정렬 회전 행렬 계산
+    R = Rotation.align_vectors([[0, 0, 1]], [gravity])[0]
+    T = np.eye(4)
+    T[:3, :3] = R.as_matrix()
+    T_inv = np.linalg.inv(T)
+    
+    # 첫 프레임 카메라의 c2w 계산 (원본 함수와 동일)
+    quat = np.array(first_frame_params['quat'])
+    pos_arcore_input = np.array(first_frame_params['pos'])
+    
+    gl_to_cv = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=np.float32)
+    R_c2w_gl = Rotation.from_quat(quat).as_matrix()
+    R_c2w_cv = gl_to_cv @ R_c2w_gl @ gl_to_cv.T
+    pos_cv = gl_to_cv @ pos_arcore_input
+    
+    c2w = np.eye(4, dtype=np.float32)
+    c2w[:3, :3] = R_c2w_cv
+    c2w[:3, 3] = pos_cv
+    
+    w2c0 = np.linalg.inv(c2w)
+    
+    # M 행렬 (CV → glTF 좌표계 변환)
+    M = np.eye(4, dtype=np.float64)
+    M[1, 1] = -1.0
+    M[2, 2] = -1.0
+    M_inv = np.linalg.inv(M)
+    
+    A_no_center = M @ w2c0.astype(np.float64)
+    A_no_center_inv = np.linalg.inv(A_no_center)
+    
+    # c2w0 계산 (원본 씬 좌표계에서의 첫 프레임 카메라 → 월드)
+    c2w0 = A_no_center_inv @ M
+    
+    # 첫 프레임 카메라 위치 (hf_alignment 적용 씬 좌표계에서)
+    first_camera_pos_original = c2w0[:3, 3]
+    first_camera_pos_hf_aligned = A[:3, :3] @ first_camera_pos_original + A[:3, 3]
+    
+    # 3단계 역변환: ARCore 월드 좌표계 → 첫 프레임 카메라 기준 좌표계
+    # OpenGL → OpenCV 좌표계 변환 (cv_to_gl의 역변환)
+    cv_to_gl = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=np.float32)
+    # cv_to_gl은 대각 행렬이므로 전치가 역행렬
+    point_arcore_world_cv = cv_to_gl.T @ point_arcore
+    
+    # ARCore 월드 (OpenCV) → 카메라 기준 (OpenCV 좌표계)
+    # transform_point_to_arcore에서: point_arcore_world_cv = c2w[:3, :3] @ point_camera_frame_cv + c2w[:3, 3]
+    # 역변환: point_camera_frame_cv = w2c[:3, :3] @ (point_arcore_world_cv - c2w[:3, 3])
+    w2c = np.linalg.inv(c2w)
+    point_camera_frame_cv = w2c[:3, :3] @ (point_arcore_world_cv - c2w[:3, 3])
+    
+    # OpenCV → glTF 좌표계 변환
+    # transform_point_to_arcore에서: point_camera_frame_cv = M_inv[:3, :3] @ point_camera_frame_gltf
+    # 역변환: point_camera_frame_gltf = M[:3, :3] @ point_camera_frame_cv
+    point_camera_frame_gltf = M[:3, :3] @ point_camera_frame_cv
+    
+    # 2단계 역변환: 첫 프레임 카메라 기준 좌표계 → hf_alignment 적용 씬
+    # transform_point_to_arcore에서: point_camera_frame_gltf = point_after_inv - first_camera_pos_hf_aligned
+    # 역변환: point_after_inv = point_camera_frame_gltf + first_camera_pos_hf_aligned
+    point_after_inv = point_camera_frame_gltf + first_camera_pos_hf_aligned
+    
+    # 1단계 역변환: hf_alignment 적용 씬 → 중력 정렬 씬
+    # transform_point_to_arcore에서: point_after_inv = T_inv[:3, :3] @ point_scene + T_inv[:3, 3]
+    # 역변환: point_after_inv - T_inv[:3, 3] = T_inv[:3, :3] @ point_scene
+    #         point_scene = T[:3, :3] @ (point_after_inv - T_inv[:3, 3])
+    point_scene = T[:3, :3] @ (point_after_inv - T_inv[:3, 3])
+    
+    return point_scene
+
 # ============================================
 # 컵 좌표 및 회전축 추출 함수
 # ============================================
@@ -544,8 +641,35 @@ def calculate_rotation_axis(glb_path, jsonl_data, scene_metadata):
         sorted_idx = np.argsort(filtered[:, 2])
         sorted_points, sorted_heights = filtered[sorted_idx], filtered[sorted_idx, 2]
         
-        # 1단계: 중심축 계산
-        z_range = np.linspace(sorted_heights.min(), sorted_heights.max(), 50)
+        # 1단계: 중심축 계산 (앵커 기반 z 범위 사용)
+        # 첫 프레임 앵커 포즈를 씬 좌표계로 변환
+        jsonl_data_sorted = sorted(jsonl_data, key=lambda x: x.get('t_ns', 0))
+        first_frame_params = jsonl_data_sorted[0]
+        
+        # 앵커 위치를 ARCore 좌표계에서 가져오기
+        anchor_pos_arcore = np.array(first_frame_params.get('anchor_pos', first_frame_params.get('pos', [0.0, 0.0, 0.0])), dtype=np.float32)
+        
+        # ARCore 좌표계 → 씬 좌표계로 변환
+        anchor_pos_scene = transform_point_from_arcore(anchor_pos_arcore, first_frame_params, scene_metadata)
+        anchor_z_scene = anchor_pos_scene[2]
+        
+        # 앵커 z값부터 5mm 간격으로 25cm 위까지 탐색
+        STEP = 0.005  # 5mm
+        SEARCH_HEIGHT = 0.25  # 25cm
+        z_range = np.arange(anchor_z_scene, anchor_z_scene + SEARCH_HEIGHT + STEP, STEP)
+        
+        # 씬 좌표계의 실제 z 범위 내로 제한
+        z_min_actual = sorted_heights.min()
+        z_max_actual = sorted_heights.max()
+        z_range = z_range[(z_range >= z_min_actual) & (z_range <= z_max_actual)]
+        
+        if len(z_range) == 0:
+            # 앵커 기반 범위가 유효하지 않으면 기존 방식 사용
+            print(f"[GPU] 앵커 기반 z 범위가 유효하지 않음. 앵커 z: {anchor_z_scene:.3f}, 실제 범위: [{z_min_actual:.3f}, {z_max_actual:.3f}]", flush=True)
+            z_range = np.linspace(sorted_heights.min(), sorted_heights.max(), 50)
+        else:
+            print(f"[GPU] 앵커 기반 z 범위 사용: {anchor_z_scene:.3f}부터 {len(z_range)}개 구간 탐색", flush=True)
+        
         circle_data = []
         
         for z in z_range:
