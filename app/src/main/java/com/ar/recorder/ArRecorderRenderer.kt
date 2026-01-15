@@ -395,16 +395,32 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
   /**
    * 앵커 pose로부터 4x4 변환 행렬 생성 (회전 + 이동)
    * GPU의 A1, Ai 행렬과 동일한 형식
+   * 
+   * 올바른 형식: T = [[R  t],
+   *                   [0  1]]
+   * 여기서 R은 회전 행렬, t는 이동 벡터
    */
   private fun buildAnchorTransformMatrix(pos: FloatArray, quat: FloatArray): FloatArray {
     val rotation = quaternionToRotationMatrix(quat[0], quat[1], quat[2], quat[3])
     val matrix = FloatArray(16)
-    android.opengl.Matrix.setIdentityM(matrix, 0)
     
-    // 회전 먼저 적용
-    android.opengl.Matrix.multiplyMM(matrix, 0, matrix, 0, rotation, 0)
-    // 그 다음 이동
-    android.opengl.Matrix.translateM(matrix, 0, pos[0], pos[1], pos[2])
+    // 회전 행렬 복사 (상단 3x3)
+    for (i in 0..2) {
+      for (j in 0..2) {
+        matrix[i * 4 + j] = rotation[i * 4 + j]
+      }
+    }
+    
+    // 이동 벡터 설정 (12, 13, 14번 인덱스)
+    matrix[12] = pos[0]
+    matrix[13] = pos[1]
+    matrix[14] = pos[2]
+    
+    // 하단 행 설정
+    matrix[3] = 0.0f   // (0,3)
+    matrix[7] = 0.0f   // (1,3)
+    matrix[11] = 0.0f  // (2,3)
+    matrix[15] = 1.0f  // (3,3)
     
     return matrix
   }
@@ -834,6 +850,31 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
         shader.setMat4("u_ModelViewProjection", modelViewProjectionMatrix)
         render.draw(lineMesh, shader)
       }
+      
+      // Draw spheres at rotation axis endpoints (0.5cm radius)
+      sphereShader?.let { shader ->
+        sphereMesh?.let { mesh ->
+          // Draw sphere at bottom point
+          Matrix.setIdentityM(modelMatrix, 0)
+          Matrix.translateM(modelMatrix, 0, bottomPoint[0], bottomPoint[1], bottomPoint[2])
+          // Scale to 0.5cm radius (SPHERE_RADIUS is 1cm, so scale by 0.5)
+          Matrix.scaleM(modelMatrix, 0, 0.5f, 0.5f, 0.5f)
+          Matrix.multiplyMM(modelViewMatrix, 0, viewMatrix, 0, modelMatrix, 0)
+          Matrix.multiplyMM(modelViewProjectionMatrix, 0, projectionMatrix, 0, modelViewMatrix, 0)
+          shader.setMat4("u_ModelViewProjection", modelViewProjectionMatrix)
+          render.draw(mesh, shader)
+          
+          // Draw sphere at top point
+          Matrix.setIdentityM(modelMatrix, 0)
+          Matrix.translateM(modelMatrix, 0, topPoint[0], topPoint[1], topPoint[2])
+          // Scale to 0.5cm radius
+          Matrix.scaleM(modelMatrix, 0, 0.5f, 0.5f, 0.5f)
+          Matrix.multiplyMM(modelViewMatrix, 0, viewMatrix, 0, modelMatrix, 0)
+          Matrix.multiplyMM(modelViewProjectionMatrix, 0, projectionMatrix, 0, modelViewMatrix, 0)
+          shader.setMat4("u_ModelViewProjection", modelViewProjectionMatrix)
+          render.draw(mesh, shader)
+        }
+      }
     }
 
     // Initialize recording if requested (on OpenGL thread)
@@ -869,6 +910,49 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
     return Math.sqrt((dx * dx + dy * dy + dz * dz).toDouble()).toFloat()
   }
   
+  /**
+   * 카메라 pose에서 forward 방향 벡터 계산 (ARCore OpenGL 좌표계: -Z 방향)
+   */
+  private fun getCameraForwardVector(cameraPose: Pose): FloatArray {
+    // 카메라의 forward 방향은 -Z 축 (OpenGL 좌표계)
+    val forwardLocal = floatArrayOf(0.0f, 0.0f, -1.0f, 1.0f)
+    
+    // Quaternion을 회전 행렬로 변환
+    val rotationMatrix = quaternionToRotationMatrix(
+      cameraPose.qx(), cameraPose.qy(), cameraPose.qz(), cameraPose.qw()
+    )
+    
+    // 회전 행렬을 적용하여 월드 좌표계의 forward 벡터 계산
+    val forwardWorld = FloatArray(4)
+    android.opengl.Matrix.multiplyMV(forwardWorld, 0, rotationMatrix, 0, forwardLocal, 0)
+    
+    // 정규화 (방향만 필요하므로)
+    val length = Math.sqrt(
+      (forwardWorld[0] * forwardWorld[0] + 
+       forwardWorld[1] * forwardWorld[1] + 
+       forwardWorld[2] * forwardWorld[2]).toDouble()
+    ).toFloat()
+    
+    return floatArrayOf(
+      forwardWorld[0] / length,
+      forwardWorld[1] / length,
+      forwardWorld[2] / length
+    )
+  }
+  
+  /**
+   * 카메라가 바라보는 방향으로 지정된 거리만큼 앞의 위치 계산
+   */
+  private fun calculatePointInFrontOfCamera(cameraPose: Pose, distanceMeters: Float): FloatArray {
+    val forward = getCameraForwardVector(cameraPose)
+    
+    return floatArrayOf(
+      cameraPose.tx() + forward[0] * distanceMeters,
+      cameraPose.ty() + forward[1] * distanceMeters,
+      cameraPose.tz() + forward[2] * distanceMeters
+    )
+  }
+  
   private fun initializeRecording(frame: Frame, camera: Camera) {
     try {
       val session = session ?: return
@@ -879,78 +963,41 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
         return
       }
       
-      // ARCore 샘플 코드 방식: 화면 중앙으로 hit test하여 평면에 앵커 생성
-      var anchorCreated = false
+      // 카메라가 바라보는 방향으로 30cm 앞에 앵커 생성
+      val cameraPose = camera.pose
+      val anchorPosition = calculatePointInFrontOfCamera(cameraPose, 0.3f) // 30cm = 0.3m
       
-      // Screen center coordinates
-      val centerX = viewportWidth / 2.0f
-      val centerY = viewportHeight / 2.0f
+      // 앵커 위치의 Pose 생성 (카메라와 같은 방향 사용)
+      // Pose 생성자는 translation(3개)과 quaternion(4개) 두 개의 FloatArray를 받습니다
+      val anchorTranslation = floatArrayOf(
+        anchorPosition[0],
+        anchorPosition[1],
+        anchorPosition[2]
+      )
+      val anchorQuaternion = floatArrayOf(
+        cameraPose.qx(),
+        cameraPose.qy(),
+        cameraPose.qz(),
+        cameraPose.qw()
+      )
       
-      // Perform hit test at screen center
-      val hitResults = frame.hitTest(centerX, centerY)
+      // Pose 객체 생성
+      val anchorPoseObj = Pose(anchorTranslation, anchorQuaternion)
       
-      // ARCore 샘플 코드 방식: 평면을 우선적으로 확인
-      for (hit in hitResults) {
-        val trackable = hit.trackable
-        
-        // 평면에 맞았는지 확인 (ARCore 샘플 코드 방식)
-        if (trackable is Plane) {
-          val plane = trackable
-          val hitPose = hit.hitPose
-          
-          // 평면이 추적 중이고, hit pose가 평면 내부에 있는지 확인
-          if (plane.trackingState == TrackingState.TRACKING &&
-              plane.isPoseInPolygon(hitPose)) {
-            
-            // 평면에 앵커 생성 (ARCore가 자동으로 평면에 고정)
-            anchor = hit.createAnchor()
-            anchorPose = anchor!!.pose  // 생성 시점의 pose 저장 (고정)
-            
-            // 앵커 위치를 시각화 리스트에 추가 (고정 위치 - 이후 업데이트 안 함)
-            val anchorPos = floatArrayOf(anchorPose!!.tx(), anchorPose!!.ty(), anchorPose!!.tz())
-            anchorSpheres.add(anchorPos)
-            
-            Log.i(TAG, "Anchor created on plane: pos=(${anchorPose!!.tx()}, ${anchorPose!!.ty()}, ${anchorPose!!.tz()})")
-            anchorCreated = true
-            break
-          }
-        }
-      }
+      // 앵커 생성
+      anchor = session.createAnchor(anchorPoseObj)
+      anchorPose = anchor!!.pose
       
-      // 평면을 찾지 못한 경우 Point 확인
-      if (!anchorCreated) {
-        for (hit in hitResults) {
-          val trackable = hit.trackable
-          if (trackable is com.google.ar.core.Point) {
-            val point = trackable
-            if (point.trackingState == TrackingState.TRACKING &&
-                point.orientationMode == com.google.ar.core.Point.OrientationMode.ESTIMATED_SURFACE_NORMAL) {
-              
-              anchor = hit.createAnchor()
-              anchorPose = anchor!!.pose
-              
-              val anchorPos = floatArrayOf(anchorPose!!.tx(), anchorPose!!.ty(), anchorPose!!.tz())
-              anchorSpheres.add(anchorPos)
-              
-              Log.i(TAG, "Anchor created on point: pos=(${anchorPose!!.tx()}, ${anchorPose!!.ty()}, ${anchorPose!!.tz()})")
-              anchorCreated = true
-              break
-            }
-          }
-        }
-      }
+      // 첫 프레임 앵커 정보 저장 (보정에 사용) - 앵커 생성 직후 즉시 저장
+      firstAnchorPos = floatArrayOf(anchorPose!!.tx(), anchorPose!!.ty(), anchorPose!!.tz())
+      firstAnchorQuat = floatArrayOf(anchorPose!!.qx(), anchorPose!!.qy(), anchorPose!!.qz(), anchorPose!!.qw())
       
-      // Fallback: 평면이나 포인트를 찾지 못한 경우 카메라 pose 사용
-      if (!anchorCreated) {
-        Log.w(TAG, "No plane/point found, using camera pose as fallback")
-        anchor = session.createAnchor(camera.pose)
-        anchorPose = camera.pose
-        
-        val anchorPos = floatArrayOf(anchorPose!!.tx(), anchorPose!!.ty(), anchorPose!!.tz())
-        anchorSpheres.add(anchorPos)
-        
-        Log.i(TAG, "Anchor created from camera pose: pos=(${anchorPose!!.tx()}, ${anchorPose!!.ty()}, ${anchorPose!!.tz()})")
-      }
+      // 앵커 위치를 시각화 리스트에 추가
+      val anchorPos = floatArrayOf(anchorPose!!.tx(), anchorPose!!.ty(), anchorPose!!.tz())
+      anchorSpheres.add(anchorPos)
+      
+      Log.i(TAG, "Anchor created 30cm in front of camera: pos=(${anchorPose!!.tx()}, ${anchorPose!!.ty()}, ${anchorPose!!.tz()})")
+      Log.i(TAG, "First anchor info saved for coordinate correction: pos=(${firstAnchorPos!![0]}, ${firstAnchorPos!![1]}, ${firstAnchorPos!![2]})")
       
       // Create output directory
       val recordingsDir = File(activity.getExternalFilesDir(null), "recordings")

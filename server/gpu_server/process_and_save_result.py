@@ -42,9 +42,9 @@ MIN_BOTTOM_GRID_COVERAGE = 0.2  # 바닥 검출을 위한 최소 그리드 커�
 BOTTOM_SEARCH_RATIO = 0.3  # 하위 30%만 바닥 검출
 
 # 중심축 선정을 위한 지표 가중치
-WEIGHT_PPM = 0.34
-WEIGHT_ANGLE_COVERAGE = 0.33
-WEIGHT_GRID_COVERAGE = 0.33
+WEIGHT_PPM = 0
+WEIGHT_ANGLE_COVERAGE = 0.5
+WEIGHT_GRID_COVERAGE = 0.5
 WEIGHT_INLIER_RATIO = 0
 
 # 그리드 기반 커버리지 계산 파라미터
@@ -641,37 +641,17 @@ def calculate_rotation_axis(glb_path, jsonl_data, scene_metadata):
         sorted_idx = np.argsort(filtered[:, 2])
         sorted_points, sorted_heights = filtered[sorted_idx], filtered[sorted_idx, 2]
         
-        # 1단계: 중심축 계산 (앵커 기반 z 범위 사용)
-        # 첫 프레임 앵커 포즈를 씬 좌표계로 변환
-        jsonl_data_sorted = sorted(jsonl_data, key=lambda x: x.get('t_ns', 0))
-        first_frame_params = jsonl_data_sorted[0]
+        # 1단계: 중심축 계산
+        print(f"[GPU] [회전축 계산] 1단계: 중심축 계산 시작", flush=True)
+        print(f"[GPU] [회전축 계산] 필터링된 점 수: {len(filtered)}, z 범위: [{sorted_heights.min():.6f}, {sorted_heights.max():.6f}]", flush=True)
         
-        # 앵커 위치를 ARCore 좌표계에서 가져오기
-        anchor_pos_arcore = np.array(first_frame_params.get('anchor_pos', first_frame_params.get('pos', [0.0, 0.0, 0.0])), dtype=np.float32)
-        
-        # ARCore 좌표계 → 씬 좌표계로 변환
-        anchor_pos_scene = transform_point_from_arcore(anchor_pos_arcore, first_frame_params, scene_metadata)
-        anchor_z_scene = anchor_pos_scene[2]
-        
-        # 앵커 z값부터 5mm 간격으로 25cm 위까지 탐색
-        STEP = 0.005  # 5mm
-        SEARCH_HEIGHT = 0.25  # 25cm
-        z_range = np.arange(anchor_z_scene, anchor_z_scene + SEARCH_HEIGHT + STEP, STEP)
-        
-        # 씬 좌표계의 실제 z 범위 내로 제한
-        z_min_actual = sorted_heights.min()
-        z_max_actual = sorted_heights.max()
-        z_range = z_range[(z_range >= z_min_actual) & (z_range <= z_max_actual)]
-        
-        if len(z_range) == 0:
-            # 앵커 기반 범위가 유효하지 않으면 기존 방식 사용
-            print(f"[GPU] 앵커 기반 z 범위가 유효하지 않음. 앵커 z: {anchor_z_scene:.3f}, 실제 범위: [{z_min_actual:.3f}, {z_max_actual:.3f}]", flush=True)
-            z_range = np.linspace(sorted_heights.min(), sorted_heights.max(), 50)
-        else:
-            print(f"[GPU] 앵커 기반 z 범위 사용: {anchor_z_scene:.3f}부터 {len(z_range)}개 구간 탐색", flush=True)
+        # z 범위를 균등하게 나누어 탐색
+        z_range = np.linspace(sorted_heights.min(), sorted_heights.max(), 200)
+        print(f"[GPU] [회전축 계산] z 범위 탐색: {len(z_range)}개 구간 (범위: [{z_range[0]:.6f}, {z_range[-1]:.6f}])", flush=True)
         
         circle_data = []
         
+        print(f"[GPU] [회전축 계산] z 범위 탐색 시작: {len(z_range)}개 구간", flush=True)
         for z in z_range:
             start = np.searchsorted(sorted_heights, z - THICKNESS)
             end = np.searchsorted(sorted_heights, z + THICKNESS)
@@ -692,12 +672,17 @@ def calculate_rotation_axis(glb_path, jsonl_data, scene_metadata):
                     'grid_coverage': circle['grid_coverage']
                 })
         
+        print(f"[GPU] [회전축 계산] 원 검출 완료: {len(circle_data)}개 원 발견", flush=True)
+        
         if not circle_data:
+            print(f"[GPU] [회전축 계산] 오류: 원을 검출하지 못했습니다", flush=True)
             return None
         
         # 점수 계산 및 정렬
         all_ppms = [c['ppm'] for c in circle_data]
         ppm_min, ppm_max = min(all_ppms), max(all_ppms)
+        
+        print(f"[GPU] [회전축 계산] PPM 범위: [{ppm_min:.2f}, {ppm_max:.2f}]", flush=True)
         
         for circle in circle_data:
             ppm_norm = (circle['ppm'] - ppm_min) / (ppm_max - ppm_min + 1e-8)
@@ -713,36 +698,67 @@ def calculate_rotation_axis(glb_path, jsonl_data, scene_metadata):
             circle['final_score'] = final_score
         
         circle_data.sort(key=lambda x: x['final_score'], reverse=True)
+        
+        # 상위 5개 원 후보 정보 출력 (중심축 좌표 포함)
+        print(f"[GPU] [회전축 계산] 상위 5개 원 후보:", flush=True)
+        for i, circle in enumerate(circle_data[:5]):
+            center = circle['center']
+            print(f"[GPU]   [{i+1}] z={circle['z']:.6f}, 중심축 좌표=({center[0]:.6f}, {center[1]:.6f}), "
+                  f"반지름={circle['radius']:.6f}, 최종점수={circle['final_score']:.6f}, "
+                  f"ppm={circle['ppm']:.2f}, angle_cov={circle['angle_coverage']:.3f}, grid_cov={circle['grid_coverage']:.3f}", flush=True)
+        
         best_circle = circle_data[0]
         center_axis = best_circle['center']
         reference_z = best_circle['z']
         reference_radius = best_circle['radius']
         max_radius_limit = reference_radius * 1.15
         
+        print(f"[GPU] [회전축 계산] 최종 선택된 중심축:", flush=True)
+        print(f"[GPU]   중심축 좌표 (씬 좌표계): ({center_axis[0]:.6f}, {center_axis[1]:.6f})", flush=True)
+        print(f"[GPU]   기준 높이 (z): {reference_z:.6f}", flush=True)
+        print(f"[GPU]   기준 반지름: {reference_radius:.6f}, 최대 반지름 제한: {max_radius_limit:.6f}", flush=True)
+        print(f"[GPU]   최종 점수: {best_circle['final_score']:.6f}", flush=True)
+        
         # 2단계: 부피 계산을 위한 원 검출
+        print(f"[GPU] [회전축 계산] 2단계: 부피 계산을 위한 원 검출 시작", flush=True)
         volume_data = []
         z_min, z_max = filtered[:, 2].min(), filtered[:, 2].max()
         STEP = 0.002
+        
+        print(f"[GPU] [회전축 계산] 전체 z 범위: [{z_min:.6f}, {z_max:.6f}], 탐색 간격: {STEP:.6f}", flush=True)
+        print(f"[GPU] [회전축 계산] 중심축 ({center_axis[0]:.6f}, {center_axis[1]:.6f}) 기준으로 원 검출", flush=True)
         
         ref_slice = get_slice(filtered, reference_z)
         if len(ref_slice) >= MIN_POINTS_PER_SLICE:
             ref_radius = detect_circle_at_axis(ref_slice[:, :2], center_axis, max_radius=max_radius_limit)
             if ref_radius:
                 add_volume_data(volume_data, reference_z, ref_radius)
+                print(f"[GPU] [회전축 계산] 기준 높이({reference_z:.6f})에서 원 검출: 반지름={ref_radius:.6f}", flush=True)
+            else:
+                print(f"[GPU] [회전축 계산] 기준 높이({reference_z:.6f})에서 원 검출 실패", flush=True)
+        else:
+            print(f"[GPU] [회전축 계산] 기준 높이({reference_z:.6f})에서 포인트 부족: {len(ref_slice)}개", flush=True)
         
         z_above = np.arange(reference_z + STEP, z_max + STEP, STEP)
+        print(f"[GPU] [회전축 계산] 위쪽 탐색: {len(z_above)}개 구간", flush=True)
         search_heights(filtered, z_above, center_axis, volume_data, max_radius=max_radius_limit)
         
         z_below = np.arange(reference_z - STEP, z_min - STEP, -STEP)
+        print(f"[GPU] [회전축 계산] 아래쪽 탐색: {len(z_below)}개 구간", flush=True)
         search_heights(filtered, z_below, center_axis, volume_data, max_radius=max_radius_limit)
         
+        print(f"[GPU] [회전축 계산] 원 검출 완료: {len(volume_data)}개 단면 발견", flush=True)
+        
         # 3단계: 바닥 검출 및 필터링
+        print(f"[GPU] [회전축 계산] 3단계: 바닥 검출 및 필터링 시작", flush=True)
         if volume_data:
             volume_data.sort(key=lambda x: x['z'])
             
             height_range = volume_data[-1]['z'] - volume_data[0]['z']
             bottom_20_percent_range = height_range * BOTTOM_SEARCH_RATIO
             bottom_20_end_z = volume_data[0]['z'] + bottom_20_percent_range
+            
+            print(f"[GPU] [회전축 계산] 전체 높이 범위: {height_range:.6f}, 바닥 검색 범위: [{volume_data[0]['z']:.6f}, {bottom_20_end_z:.6f}]", flush=True)
             
             bottom_detected_heights = []
             for data in volume_data:
@@ -758,10 +774,16 @@ def calculate_rotation_axis(glb_path, jsonl_data, scene_metadata):
             
             if bottom_detected_heights:
                 bottom_end_z = max(bottom_detected_heights)
+                print(f"[GPU] [회전축 계산] 바닥 검출: {len(bottom_detected_heights)}개 높이에서 바닥 발견, 최대 높이: {bottom_end_z:.6f}", flush=True)
                 volume_data_filtered = [data for data in volume_data if data['z'] > bottom_end_z]
                 
                 if len(volume_data_filtered) > 1:
+                    print(f"[GPU] [회전축 계산] 바닥 필터링: {len(volume_data)}개 → {len(volume_data_filtered)}개", flush=True)
                     volume_data = volume_data_filtered
+                else:
+                    print(f"[GPU] [회전축 계산] 바닥 필터링 후 데이터 부족, 필터링 취소", flush=True)
+            else:
+                print(f"[GPU] [회전축 계산] 바닥 검출 실패, 필터링 없이 진행", flush=True)
         
         if not volume_data:
             return None
@@ -770,13 +792,22 @@ def calculate_rotation_axis(glb_path, jsonl_data, scene_metadata):
         z_min_filtered = volume_data[0]['z']
         z_max_filtered = volume_data[-1]['z']
         
+        print(f"[GPU] [회전축 계산] 필터링 후 z 범위: [{z_min_filtered:.6f}, {z_max_filtered:.6f}], 높이: {z_max_filtered - z_min_filtered:.6f}", flush=True)
+        
         # 4단계: 두 점 계산 (씬 좌표계)
+        print(f"[GPU] [회전축 계산] 4단계: 회전축 끝점 계산 (씬 좌표계)", flush=True)
         bottom_point_scene = np.array([center_axis[0], center_axis[1], z_min_filtered])
         top_point_scene = np.array([center_axis[0], center_axis[1], z_max_filtered])
+        
+        print(f"[GPU] [회전축 계산] 씬 좌표계 회전축 끝점:", flush=True)
+        print(f"[GPU]   중심축 좌표 (x, y): ({center_axis[0]:.6f}, {center_axis[1]:.6f})", flush=True)
+        print(f"[GPU]   하단점: ({bottom_point_scene[0]:.6f}, {bottom_point_scene[1]:.6f}, {bottom_point_scene[2]:.6f})", flush=True)
+        print(f"[GPU]   상단점: ({top_point_scene[0]:.6f}, {top_point_scene[1]:.6f}, {top_point_scene[2]:.6f})", flush=True)
         
         # 5단계: ARCore 월드 좌표계로 변환 (첫 프레임 앵커 기준 월드 W*)
         # GPU에서 프레임 간 드리프트 보정이 이미 적용되어 있으므로,
         # 결과는 "첫 프레임 앵커 기준 월드 좌표"로 반환
+        print(f"[GPU] [회전축 계산] 5단계: ARCore 월드 좌표계로 변환", flush=True)
         jsonl_data_sorted = sorted(jsonl_data, key=lambda x: x.get('t_ns', 0))
         first_frame_params = jsonl_data_sorted[0]
         
@@ -787,8 +818,10 @@ def calculate_rotation_axis(glb_path, jsonl_data, scene_metadata):
             top_point_scene, first_frame_params, scene_metadata
         )
         
-        print(f"[GPU] 회전축 월드 좌표: bottom=({bottom_point_world[0]:.3f}, {bottom_point_world[1]:.3f}, {bottom_point_world[2]:.3f}), "
-              f"top=({top_point_world[0]:.3f}, {top_point_world[1]:.3f}, {top_point_world[2]:.3f})", flush=True)
+        print(f"[GPU] [회전축 계산] ARCore 좌표계 회전축 끝점:", flush=True)
+        print(f"[GPU]   하단점: ({bottom_point_world[0]:.6f}, {bottom_point_world[1]:.6f}, {bottom_point_world[2]:.6f})", flush=True)
+        print(f"[GPU]   상단점: ({top_point_world[0]:.6f}, {top_point_world[1]:.6f}, {top_point_world[2]:.6f})", flush=True)
+        print(f"[GPU] [회전축 계산] 회전축 계산 완료", flush=True)
         
         return {
             'bottom_point': [float(bottom_point_world[0]), float(bottom_point_world[1]), float(bottom_point_world[2])],
