@@ -21,6 +21,8 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.google.ar.core.Config
 import com.google.ar.core.Session
+import com.google.ar.core.CameraConfig
+import com.google.ar.core.CameraConfigFilter
 import com.ar.recorder.common.helpers.CameraPermissionHelper
 import com.ar.recorder.common.helpers.FullScreenHelper
 import com.ar.recorder.common.samplerender.SampleRender
@@ -85,6 +87,33 @@ class ArRecorderActivity : AppCompatActivity() {
 
   // Configure the session
   fun configureSession(session: Session) {
+    // Get supported camera configurations
+    val filter = CameraConfigFilter(session)
+    val cameraConfigs = session.getSupportedCameraConfigs(filter)
+    
+    // Find the configuration with the highest image resolution
+    var bestConfig: CameraConfig? = null
+    var maxResolution = 0
+    
+    for (config in cameraConfigs) {
+      val imageSize = config.imageSize
+      val resolution = imageSize.width * imageSize.height
+      if (resolution > maxResolution) {
+        maxResolution = resolution
+        bestConfig = config
+      }
+    }
+    
+    // Set the highest resolution camera config if found
+    if (bestConfig != null) {
+      session.cameraConfig = bestConfig
+      val imageSize = bestConfig.imageSize
+      Log.i(TAG, "Camera config set to highest resolution: ${imageSize.width}x${imageSize.height} (${maxResolution} pixels)")
+    } else {
+      Log.w(TAG, "No camera config found, using default")
+    }
+    
+    // Configure session with other settings
     session.configure(
       session.config.apply {
         // Enable autofocus for better image quality

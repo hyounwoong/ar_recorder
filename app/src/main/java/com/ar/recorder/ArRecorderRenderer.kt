@@ -121,6 +121,16 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
   
   // Anchor visualization
   private val anchorSpheres = mutableListOf<FloatArray>()  // List of anchor positions for visualization
+  
+  // Tracking stability detection
+  private var stableStartTime: Long? = null
+  private var previousPose: Pose? = null
+  private var previousTimestamp: Long = 0
+  private var isTrackingStable = false
+  
+  private val REQUIRED_STABLE_DURATION_NS = 2_000_000_000L // 2 seconds in nanoseconds
+  private val TRANSLATION_THRESHOLD = 0.05f // 5cm
+  private val ROTATION_THRESHOLD = 2.0f // 2 degrees
 
   val session
     get() = activity.arCoreSessionHelper.session
@@ -529,6 +539,50 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
   }
   
   /**
+   * Quaternion 간 각도 차이 계산 (도 단위)
+   */
+  private fun calculateQuaternionAngle(q1: FloatArray, q2: FloatArray): Float {
+    // Quaternion 내적
+    val dot = q1[0] * q2[0] + q1[1] * q2[1] + q1[2] * q2[2] + q1[3] * q2[3]
+    // 각도 계산 (라디안 → 도)
+    val angleRad = 2.0 * kotlin.math.acos(kotlin.math.abs(dot).toDouble())
+    return Math.toDegrees(angleRad).toFloat()
+  }
+  
+  /**
+   * Tracking 안정화 감지
+   * TrackingState + 시간 체크 (드리프트 체크 제거 - 핸드폰 움직임 허용)
+   */
+  private fun checkTrackingStability(camera: Camera, frame: Frame): Boolean {
+    // 1. TrackingState 체크
+    if (camera.trackingState != TrackingState.TRACKING) {
+      stableStartTime = null
+      isTrackingStable = false
+      return false
+    }
+    
+    val currentTimestamp = frame.timestamp
+    
+    // 2. 시간 체크 (지속성)
+    // TrackingState가 TRACKING이고 일정 시간 지속되면 안정화된 것으로 판단
+    // 드리프트 체크는 제거 - 핸드폰을 움직여도 안정화 진행
+    if (stableStartTime == null) {
+      stableStartTime = currentTimestamp
+    }
+    
+    val stableDuration = currentTimestamp - stableStartTime!!
+    
+    if (stableDuration >= REQUIRED_STABLE_DURATION_NS) {
+      // 안정화 완료!
+      isTrackingStable = true
+      return true
+    }
+    
+    isTrackingStable = false
+    return false
+  }
+  
+  /**
    * 앵커 좌표를 UI에 표시
    */
   // 앵커 좌표 UI 표시
@@ -652,7 +706,30 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
 
     val camera = frame.camera
     
-    // 새 앵커 생성 로직 제거 (GPU 좌표를 그대로 사용하므로 앵커 기준 변환 불필요)
+    // Tracking 안정화 감지 (매 프레임 체크)
+    val isStable = checkTrackingStability(camera, frame)
+    
+    // 안정화 상태에 따라 Start 버튼 활성화/비활성화
+    if (!isRecording.get() && !shouldStartRecording.get()) {
+      activity.runOnUiThread {
+        if (isStable) {
+          // 안정화 완료: Start 버튼 활성화
+          activity.view.startButton.isEnabled = true
+          activity.view.statusText.text = "준비 완료! Start 버튼을 누르세요"
+        } else {
+          // 안정화 중: Start 버튼 비활성화
+          activity.view.startButton.isEnabled = false
+          val stableDuration = if (stableStartTime != null) {
+            (frame.timestamp - stableStartTime!!) / 1_000_000_000.0
+          } else {
+            0.0
+          }
+          activity.view.statusText.text = String.format(
+            "환경 스캔 중... (%.1f초 / 2.0초)", stableDuration
+          )
+        }
+      }
+    }
     
     // Update anchor coordinates display
     updateAnchorCoordinatesDisplay()
@@ -777,8 +854,8 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
             Matrix.setIdentityM(modelMatrix, 0)
             Matrix.translateM(modelMatrix, 0, anchorPoint[0], anchorPoint[1], anchorPoint[2])
             
-            // Scale anchor sphere to be slightly larger
-            Matrix.scaleM(modelMatrix, 0, 1.5f, 1.5f, 1.5f)
+            // Scale anchor sphere to 1mm radius (SPHERE_RADIUS is 1cm, so scale by 0.1)
+            Matrix.scaleM(modelMatrix, 0, 0.1f, 0.1f, 0.1f)
             
             // Calculate MVP matrix
             Matrix.multiplyMM(modelViewMatrix, 0, viewMatrix, 0, modelMatrix, 0)
@@ -878,6 +955,7 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
     }
 
     // Initialize recording if requested (on OpenGL thread)
+    // 앵커는 즉시 생성, 안정화 감지는 참고용으로만 사용
     if (shouldStartRecording.get() && camera.trackingState == TrackingState.TRACKING) {
       initializeRecording(frame, camera)
     }
@@ -893,11 +971,24 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
       Log.w(TAG, "Already recording")
       return
     }
+    
+    // 안정화 확인 (이미 안정화된 상태에서만 호출되어야 함)
+    if (!isTrackingStable) {
+      Log.w(TAG, "Tracking not stable yet, cannot start recording")
+      activity.runOnUiThread {
+        activity.view.statusText.text = "아직 안정화되지 않았습니다. 잠시 기다려주세요..."
+      }
+      return
+    }
 
     // Set flag to start recording on next frame (onDrawFrame will handle it)
     // This ensures session.update() is called on the OpenGL thread
     shouldStartRecording.set(true)
-    Log.i(TAG, "Recording start requested, will start on next frame")
+    Log.i(TAG, "Recording start requested, will create anchor immediately on next frame")
+    
+    activity.runOnUiThread {
+      activity.view.statusText.text = "앵커 생성 중..."
+    }
   }
   
   /**
@@ -963,6 +1054,18 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
         return
       }
       
+      // 안정화 상태 로그 (참고용)
+      if (isTrackingStable) {
+        Log.i(TAG, "Tracking stable, creating anchor...")
+      } else {
+        val stableDuration = if (stableStartTime != null) {
+          (frame.timestamp - stableStartTime!!) / 1_000_000_000.0
+        } else {
+          0.0
+        }
+        Log.i(TAG, "Creating anchor immediately (stability: ${stableDuration}s)")
+      }
+      
       // 카메라가 바라보는 방향으로 30cm 앞에 앵커 생성
       val cameraPose = camera.pose
       val anchorPosition = calculatePointInFrontOfCamera(cameraPose, 0.3f) // 30cm = 0.3m
@@ -1017,8 +1120,16 @@ class ArRecorderRenderer(val activity: ArRecorderActivity) :
       lastSampleTimestamp = 0
       isRecording.set(true)
       shouldStartRecording.set(false)
+      
+      // 안정화 감지 상태 리셋
+      stableStartTime = null
+      previousPose = null
+      isTrackingStable = false
 
       Log.i(TAG, "Recording started: ${outputDir!!.absolutePath}")
+      activity.runOnUiThread {
+        activity.view.statusText.text = "녹화 중..."
+      }
     } catch (e: Exception) {
       Log.e(TAG, "Failed to start recording", e)
       showError("Failed to start recording: $e")

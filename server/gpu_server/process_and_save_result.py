@@ -1037,7 +1037,7 @@ if __name__ == "__main__":
     output_dir = os.path.join(project_root, "output")
     os.makedirs(output_dir, exist_ok=True)
     
-    model = DepthAnything3.from_pretrained("depth-anything/da3-giant").to("cuda")
+    model = DepthAnything3.from_pretrained("depth-anything/da3-base").to("cuda")
     model_load_time = time.time() - model_load_start
     print(f"[GPU] 모델 로딩 완료 ({model_load_time:.2f}초)", flush=True)
     

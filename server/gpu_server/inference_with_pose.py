@@ -43,7 +43,11 @@ def get_frame_number_from_timestamp(t_ns):
 if __name__ == "__main__":
     # 폴더 경로 설정 (직접 실행 시에만 사용됨, process_and_save_result.py에서는 인자로 전달됨)
     base_folder = "/data/ephemeral/home/measure_volume_by_multiview/project/ar_folder"
-    session_folders = sorted(glob.glob(os.path.join(base_folder, "session_*")))
+    # 디렉토리만 필터링
+    session_folders = [
+        f for f in sorted(glob.glob(os.path.join(base_folder, "session_*")))
+        if os.path.isdir(f)
+    ]
     if not session_folders:
         raise FileNotFoundError(f"세션 폴더를 찾을 수 없습니다: {os.path.join(base_folder, 'session_*')}")
 
@@ -145,7 +149,7 @@ if __name__ == "__main__":
         ], dtype=np.float32)
 
     # DA3 추론
-    model = DepthAnything3.from_pretrained("depth-anything/da3-giant").to("cuda")
+    model = DepthAnything3.from_pretrained("depth-anything/da3-small").to("cuda")
 
     prediction = model.inference(
         image=matched_image_files,

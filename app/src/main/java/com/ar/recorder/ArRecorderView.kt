@@ -42,6 +42,9 @@ class ArRecorderView(val activity: ArRecorderActivity) : DefaultLifecycleObserve
   val snackbarHelper = SnackbarHelper()
 
   init {
+    // 초기 상태: Start 버튼 비활성화 (안정화 대기)
+    startButton.isEnabled = false
+    
     startButton.setOnClickListener {
       activity.renderer.startRecording()
       startButton.isEnabled = false
