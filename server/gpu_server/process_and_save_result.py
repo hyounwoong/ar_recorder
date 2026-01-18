@@ -42,10 +42,10 @@ MIN_BOTTOM_GRID_COVERAGE = 0.2  # 바닥 검출을 위한 최소 그리드 커�
 BOTTOM_SEARCH_RATIO = 0.3  # 하위 30%만 바닥 검출
 
 # 중심축 선정을 위한 지표 가중치
-WEIGHT_PPM = 0
-WEIGHT_ANGLE_COVERAGE = 0.5
-WEIGHT_GRID_COVERAGE = 0.5
-WEIGHT_INLIER_RATIO = 0
+WEIGHT_PPM = 0.3
+WEIGHT_ANGLE_COVERAGE = 0.4
+WEIGHT_GRID_COVERAGE = 0
+WEIGHT_INLIER_RATIO = 0.3
 
 # 그리드 기반 커버리지 계산 파라미터
 GRID_SIZE = 40
@@ -646,7 +646,7 @@ def calculate_rotation_axis(glb_path, jsonl_data, scene_metadata):
         print(f"[GPU] [회전축 계산] 필터링된 점 수: {len(filtered)}, z 범위: [{sorted_heights.min():.6f}, {sorted_heights.max():.6f}]", flush=True)
         
         # z 범위를 균등하게 나누어 탐색
-        z_range = np.linspace(sorted_heights.min(), sorted_heights.max(), 200)
+        z_range = np.linspace(sorted_heights.min(), sorted_heights.max(), 50)
         print(f"[GPU] [회전축 계산] z 범위 탐색: {len(z_range)}개 구간 (범위: [{z_range[0]:.6f}, {z_range[-1]:.6f}])", flush=True)
         
         circle_data = []
@@ -1048,9 +1048,10 @@ if __name__ == "__main__":
         extrinsics=extrinsics,
         intrinsics=intrinsics,
         align_to_input_ext_scale=True,
+        process_res=756,
         use_ray_pose=True,
         export_dir=output_dir,
-        export_format="glb"
+        export_format="glb-mini_npz"
     )
     print(f"[GPU] DA3 추론 완료 ({(time.time() - inference_start):.2f}초)", flush=True)
     
